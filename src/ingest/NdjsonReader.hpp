@@ -25,6 +25,10 @@ struct IngestStats {
 };
 
 using MarketDataEventConsumer = std::function<void(const MarketDataEvent &)>;
+using MarketDataEventVisitor = std::function<bool(const MarketDataEvent &)>;
+
+IngestStats parseNdjsonFile(const std::filesystem::path &path,
+                            const MarketDataEventVisitor &visitor);
 
 IngestStats parseNdjsonFile(const std::filesystem::path &path,
                             const MarketDataEventConsumer &consumer);
