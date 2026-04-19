@@ -24,7 +24,8 @@ enum class MergeStrategy {
 const char *mergeStrategyName(MergeStrategy strategy) noexcept;
 
 struct FolderIngestOptions {
-  std::size_t queue_capacity = 1024;
+  std::size_t queue_capacity = 64;
+  std::size_t batch_size = 512;
 };
 
 struct FolderIngestStats {
