@@ -35,11 +35,13 @@ void writeLines(const std::filesystem::path &path,
 
 std::vector<std::uint64_t>
 collectStrategyTimestamps(const std::filesystem::path &folder,
-                          MergeStrategy strategy, FolderIngestStats &stats) {
+                          MergeStrategy strategy, FolderIngestStats &stats,
+                          FolderIngestOptions options = {}) {
   std::vector<std::uint64_t> seen;
-  stats = ingestFolder(folder, strategy, [&](const MarketDataEvent &event) {
-    seen.push_back(event.order_id);
-  });
+  stats = ingestFolder(
+      folder, strategy,
+      [&](const MarketDataEvent &event) { seen.push_back(event.order_id); },
+      options);
   return seen;
 }
 
@@ -70,11 +72,12 @@ TEST_CASE("ingestFolder preserves chronological order for both strategies",
       });
 
   FolderIngestStats flat_stats{};
-  const auto flat_order =
-      collectStrategyTimestamps(dir.getPath(), MergeStrategy::Flat, flat_stats);
+  const FolderIngestOptions tiny_batches{.queue_capacity = 2, .batch_size = 2};
+  const auto flat_order = collectStrategyTimestamps(
+      dir.getPath(), MergeStrategy::Flat, flat_stats, tiny_batches);
   FolderIngestStats hierarchy_stats{};
   const auto hierarchy_order = collectStrategyTimestamps(
-      dir.getPath(), MergeStrategy::Hierarchy, hierarchy_stats);
+      dir.getPath(), MergeStrategy::Hierarchy, hierarchy_stats, tiny_batches);
 
   const std::vector<std::uint64_t> expected{
       1001, 2001, 3001, 1002, 2002, 3002, 1003, 3003};
@@ -111,13 +114,34 @@ TEST_CASE("ingestFolder keeps deterministic order for equal event keys",
       });
 
   FolderIngestStats flat_stats{};
-  const auto flat_order =
-      collectStrategyTimestamps(dir.getPath(), MergeStrategy::Flat, flat_stats);
+  const FolderIngestOptions tiny_batches{.queue_capacity = 1, .batch_size = 1};
+  const auto flat_order = collectStrategyTimestamps(
+      dir.getPath(), MergeStrategy::Flat, flat_stats, tiny_batches);
   FolderIngestStats hierarchy_stats{};
   const auto hierarchy_order = collectStrategyTimestamps(
-      dir.getPath(), MergeStrategy::Hierarchy, hierarchy_stats);
+      dir.getPath(), MergeStrategy::Hierarchy, hierarchy_stats, tiny_batches);
 
   const std::vector<std::uint64_t> expected{11, 22};
   REQUIRE(flat_order == expected);
   REQUIRE(hierarchy_order == expected);
+}
+
+TEST_CASE("ingestFolder rejects zero batch_size and zero queue_capacity",
+          "[folder-ingest]") {
+  TempDir dir("back-tester-folder-ingest-zero-opts");
+  writeLines(
+      dir.getPath() / "a.json",
+      {
+          R"({"ts_recv":100,"hd":{"ts_event":100,"rtype":160,"publisher_id":7,"instrument_id":1},"order_id":"1","action":"A","side":"B","price":1,"size":1,"sequence":1})",
+      });
+
+  const auto consumer = [](const MarketDataEvent &) {};
+
+  REQUIRE_THROWS_AS(
+      ingestFolder(dir.getPath(), MergeStrategy::Flat, consumer,
+                   FolderIngestOptions{.queue_capacity = 0}),
+      std::invalid_argument);
+  REQUIRE_THROWS_AS(ingestFolder(dir.getPath(), MergeStrategy::Flat, consumer,
+                                 FolderIngestOptions{.batch_size = 0}),
+                    std::invalid_argument);
 }
