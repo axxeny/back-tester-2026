@@ -54,7 +54,9 @@ struct MarketDataEvent {
 
 // Primary ordering matches the Databento "index timestamp" convention and the
 // future k-way merger. Tie-break by publisher_id then sequence so the order is
-// total (safe for priority_queue).
+// total (safe for priority_queue). Ordering intentionally ignores payload
+// fields (price/size/order_id/...): use sameOrderKey() when you want to test
+// whether two events share the merge key, not operator== on the payload.
 constexpr auto mdeOrderKey(const MarketDataEvent &e) noexcept {
   struct Key {
     std::uint64_t ts_recv;
@@ -70,8 +72,8 @@ constexpr std::strong_ordering operator<=>(const MarketDataEvent &a,
   return mdeOrderKey(a) <=> mdeOrderKey(b);
 }
 
-constexpr bool operator==(const MarketDataEvent &a,
-                          const MarketDataEvent &b) noexcept {
+constexpr bool sameOrderKey(const MarketDataEvent &a,
+                            const MarketDataEvent &b) noexcept {
   return mdeOrderKey(a) == mdeOrderKey(b);
 }
 

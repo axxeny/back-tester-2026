@@ -10,10 +10,21 @@ import zipfile
 from pathlib import Path
 
 
+def find_task_inbox(start: Path, task_name: str = "001-hw1") -> Path | None:
+    # Walk up from the script looking for `.axxeny-code/tasks/<task>/inbox`,
+    # so the script works from both the main checkout and a worktree clone
+    # (.axxeny-code/worktrees/<name>-llm/scripts/...).
+    for ancestor in [start, *start.parents]:
+        candidate = ancestor / ".axxeny-code" / "tasks" / task_name / "inbox"
+        if candidate.is_dir():
+            return candidate
+    return None
+
+
 def parse_args() -> argparse.Namespace:
     repo_root = Path(__file__).resolve().parents[1]
     default_binary = repo_root / "build" / "bin" / "back-tester"
-    default_inbox = repo_root.parents[1] / "tasks" / "001-hw1" / "inbox"
+    default_inbox = find_task_inbox(repo_root)
 
     parser = argparse.ArgumentParser(
         description=(
@@ -113,7 +124,15 @@ def run_smoke(binary: Path, zip_path: Path, member_name: str, keep_json: bool) -
 
 def main() -> int:
     args = parse_args()
-    zip_path = args.zip_path or pick_zip(args.task_inbox)
+    if args.zip_path is None:
+        if args.task_inbox is None:
+            raise SystemExit(
+                "Could not locate task inbox automatically; "
+                "pass --task-inbox or --zip explicitly."
+            )
+        zip_path = pick_zip(args.task_inbox)
+    else:
+        zip_path = args.zip_path
 
     with zipfile.ZipFile(zip_path) as zf:
         member = args.member or pick_member(zf).filename

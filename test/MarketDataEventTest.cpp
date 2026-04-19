@@ -38,20 +38,24 @@ TEST_CASE(
   REQUIRE(a < d);
 }
 
-TEST_CASE("MarketDataEvent equality uses the same key as the comparator",
-          "[mde]") {
+TEST_CASE("MarketDataEvent sameOrderKey matches the comparator", "[mde]") {
   MarketDataEvent a{};
   a.ts_recv = 42;
   a.publisher_id = 3;
   a.sequence = 7;
-  // differ in fields outside the key — comparator should treat as equal
+  // differ in fields outside the key — comparator should treat as equivalent,
+  // but events are not "equal" in the full-payload sense
   MarketDataEvent b = a;
   b.order_id = 99999;
   b.price = 123;
   b.size = 5;
-  REQUIRE(a == b);
+  REQUIRE(sameOrderKey(a, b));
   REQUIRE_FALSE(a < b);
   REQUIRE_FALSE(b < a);
+
+  MarketDataEvent c = a;
+  c.sequence = 8;
+  REQUIRE_FALSE(sameOrderKey(a, c));
 }
 
 TEST_CASE("MarketDataEvent price preserves int64 fixed precision", "[mde]") {

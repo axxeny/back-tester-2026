@@ -4,6 +4,7 @@
 #include "common/MarketDataEvent.hpp"
 #include "ingest/NdjsonReader.hpp"
 
+#include <algorithm>
 #include <array>
 #include <cstddef>
 #include <exception>

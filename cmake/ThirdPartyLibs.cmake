@@ -14,22 +14,24 @@ set(FORWARDED_CMAKE_ARGS
 
 set(DESTDIR "")
 
+# Pre-create the install dirs so linkers don't emit "search path not found"
+# warnings on the first build (ExternalProject populates them later).
+file(MAKE_DIRECTORY
+    "${CMAKE_BINARY_DIR}/include"
+    "${CMAKE_BINARY_DIR}/lib"
+)
+
 function(add_external_install_paths TARGET_NAME)
-    if(EXISTS "${CMAKE_BINARY_DIR}/include")
-        target_include_directories(${TARGET_NAME} SYSTEM PUBLIC INTERFACE
-            "${CMAKE_BINARY_DIR}/include"
-        )
-    endif()
-    if(EXISTS "${CMAKE_BINARY_DIR}/lib")
-        target_link_directories(${TARGET_NAME} PUBLIC INTERFACE
-            "${CMAKE_BINARY_DIR}/lib"
-        )
-    endif()
-    if(EXISTS "${CMAKE_BINARY_DIR}/lib64")
-        target_link_directories(${TARGET_NAME} PUBLIC INTERFACE
-            "${CMAKE_BINARY_DIR}/lib64"
-        )
-    endif()
+    # Attach unconditionally: the directories are populated by the
+    # ExternalProject install step at build time, not at configure time.
+    # Both Catch2 and simdjson install into `lib/` on this build; no `lib64/`
+    # fallback is added until a consumer actually needs it.
+    target_include_directories(${TARGET_NAME} SYSTEM PUBLIC INTERFACE
+        "${CMAKE_BINARY_DIR}/include"
+    )
+    target_link_directories(${TARGET_NAME} PUBLIC INTERFACE
+        "${CMAKE_BINARY_DIR}/lib"
+    )
 endfunction()
 
 # ---------------------------------------------------------------------------------------
