@@ -14,6 +14,26 @@ set(FORWARDED_CMAKE_ARGS
 
 set(DESTDIR "")
 
+# Pre-create the install dirs so linkers don't emit "search path not found"
+# warnings on the first build (ExternalProject populates them later).
+file(MAKE_DIRECTORY
+    "${CMAKE_BINARY_DIR}/include"
+    "${CMAKE_BINARY_DIR}/lib"
+)
+
+function(add_external_install_paths TARGET_NAME)
+    # Attach unconditionally: the directories are populated by the
+    # ExternalProject install step at build time, not at configure time.
+    # Both Catch2 and simdjson install into `lib/` on this build; no `lib64/`
+    # fallback is added until a consumer actually needs it.
+    target_include_directories(${TARGET_NAME} SYSTEM PUBLIC INTERFACE
+        "${CMAKE_BINARY_DIR}/include"
+    )
+    target_link_directories(${TARGET_NAME} PUBLIC INTERFACE
+        "${CMAKE_BINARY_DIR}/lib"
+    )
+endfunction()
+
 # ---------------------------------------------------------------------------------------
 # Catch2 - C++ testing framework
 ExternalProject_Add(
@@ -32,10 +52,32 @@ ExternalProject_Add(
 set(TGT Catch2-static-lib)
 add_library(${TGT} INTERFACE)
 add_dependencies(${TGT} Catch2)
-target_include_directories(${TGT} SYSTEM PUBLIC INTERFACE ${CMAKE_BINARY_DIR}/include)
-target_link_directories(${TGT} PUBLIC INTERFACE ${CMAKE_BINARY_DIR}/lib ${CMAKE_BINARY_DIR}/lib64)
+add_external_install_paths(${TGT})
 target_link_libraries(${TGT} PUBLIC INTERFACE
     $<$<CONFIG:Debug>:-lCatch2Maind -lCatch2d>
     $<$<CONFIG:Release>:-lCatch2Main -lCatch2>
 )
 
+# ---------------------------------------------------------------------------------------
+# simdjson - fast JSON parser, used by the ingest layer
+ExternalProject_Add(
+    simdjson
+    GIT_REPOSITORY https://github.com/simdjson/simdjson.git
+    GIT_TAG v3.10.1
+    GIT_SHALLOW TRUE
+    GIT_PROGRESS TRUE
+    SOURCE_DIR "${CMAKE_SOURCE_DIR}/3rdparty/simdjson"
+    BINARY_DIR "${CMAKE_BINARY_DIR}/3rdparty/simdjson"
+    CMAKE_ARGS ${FORWARDED_CMAKE_ARGS}
+        -DSIMDJSON_DEVELOPER_MODE=OFF
+        -DSIMDJSON_JUST_LIBRARY=ON
+        -DBUILD_SHARED_LIBS=OFF
+    BUILD_COMMAND $(MAKE)
+    INSTALL_COMMAND $(MAKE) -s DESTDIR=${DESTDIR} install
+)
+
+set(TGT simdjson-static-lib)
+add_library(${TGT} INTERFACE)
+add_dependencies(${TGT} simdjson)
+add_external_install_paths(${TGT})
+target_link_libraries(${TGT} PUBLIC INTERFACE -lsimdjson)
