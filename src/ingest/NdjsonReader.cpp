@@ -9,7 +9,7 @@
 namespace cmf {
 
 IngestStats parseNdjsonFile(const std::filesystem::path &path,
-                            const MarketDataEventConsumer &consumer) {
+                            const MarketDataEventVisitor &visitor) {
   std::ifstream fs(path);
   if (!fs) {
     throw std::runtime_error("parseNdjsonFile: cannot open " + path.string());
@@ -35,7 +35,9 @@ IngestStats parseNdjsonFile(const std::filesystem::path &path,
       }
       stats.last_ts_recv = e.ts_recv;
       ++stats.consumed;
-      consumer(e);
+      if (!visitor(e)) {
+        return stats;
+      }
       break;
     }
     case DecodeOutcome::SkippedRtype:
@@ -48,6 +50,15 @@ IngestStats parseNdjsonFile(const std::filesystem::path &path,
   }
 
   return stats;
+}
+
+IngestStats parseNdjsonFile(const std::filesystem::path &path,
+                            const MarketDataEventConsumer &consumer) {
+  return parseNdjsonFile(
+      path, MarketDataEventVisitor{[&](const MarketDataEvent &event) {
+        consumer(event);
+        return true;
+      }});
 }
 
 } // namespace cmf
