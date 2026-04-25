@@ -95,6 +95,26 @@ Hard-variant run against an extracted folder of daily JSON files:
 build/bin/back-tester /path/to/folder --strategy both --preview-limit 10
 ```
 
+Homework 2 style run with LOB snapshots and bounded final-book output:
+
+```bash
+build/bin/back-tester /path/to/folder \
+  --strategy both \
+  --preview-limit 0 \
+  --snapshot-every 500000 \
+  --snapshot-depth 5 \
+  --max-snapshots 3 \
+  --final-books-limit 20
+```
+
+Convert raw Databento NDJSON files into Feather:
+
+```bash
+uv run --no-project scripts/convert_to_feather.py \
+  /path/to/xeur-eobi-20260310.mbo.json \
+  --out-dir build/feather
+```
+
 Benchmark all `.mbo.json` members inside one or more input zips and write reports:
 
 ```bash
