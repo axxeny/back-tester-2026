@@ -43,6 +43,16 @@ cmake -B build -S .
 cmake --build build -j
 ```
 
+Local reproducible Feather env:
+
+```bash
+uv sync --group feather --no-dev
+cmake -S . -B build
+cmake --build build -j
+```
+
+If repo-local `.venv` has `pyarrow`, CMake auto-detects Arrow headers/libs from it and enables Feather ingest. Without that group, build still works but Feather input stays disabled at runtime.
+
 or
 
 ```
@@ -81,6 +91,81 @@ Back-tester:
 
 ```
 build/bin/back-tester
+```
+
+Smoke test against one real zipped Databento file:
+
+```bash
+python3 scripts/smoke_ingest.py --zip /path/to/day.zip
+```
+
+Hard-variant run against an extracted folder of daily JSON files:
+
+```bash
+build/bin/back-tester /path/to/folder --strategy both --preview-limit 10
+```
+
+Homework 2 style run with LOB snapshots and bounded final-book output:
+
+```bash
+build/bin/back-tester /path/to/folder \
+  --strategy both \
+  --preview-limit 0 \
+  --snapshot-every 500000 \
+  --snapshot-depth 5 \
+  --max-snapshots 3 \
+  --final-books-limit 20
+```
+
+Convert raw Databento NDJSON files into Feather:
+
+```bash
+.venv/bin/python scripts/convert_to_feather.py \
+  /path/to/xeur-eobi-20260310.mbo.json \
+  --out-dir build/feather
+```
+
+Replay same file from Feather through C++ Arrow ingest:
+
+```bash
+build/bin/back-tester build/feather/xeur-eobi-20260310.mbo.feather \
+  --preview-limit 0 \
+  --snapshot-every 500000 \
+  --max-snapshots 2
+```
+
+Benchmark all `.mbo.json` members inside one or more input zips and write reports:
+
+```bash
+.venv/bin/python scripts/bench_zip_ingest.py \
+  --zip /path/to/day-1.zip \
+  --zip /path/to/day-2.zip \
+  --input-format both \
+  --lob-workers 2 \
+  --scratch-dir .axxeny-code/tmp \
+  --csv-out build/bench/ingest.csv \
+  --md-out build/bench/ingest.md
+```
+
+Benchmark hard-variant folder ingest for both merge strategies:
+
+```bash
+.venv/bin/python scripts/bench_folder_ingest.py \
+  --input-dir /path/to/json-folder \
+  --input-format both \
+  --lob-workers 2 \
+  --snapshot-mode async \
+  --scratch-dir .axxeny-code/tmp \
+  --csv-out build/bench/hard_ingest.csv \
+  --md-out build/bench/hard_ingest.md
+```
+
+Useful bounded runs:
+
+```bash
+.venv/bin/python scripts/bench_zip_ingest.py --task-inbox /path/to/zips --limit-members 1 --scratch-dir .axxeny-code/tmp
+.venv/bin/python scripts/bench_zip_ingest.py --task-inbox /path/to/zips --member-substr 20260406 --input-format both --scratch-dir .axxeny-code/tmp
+.venv/bin/python scripts/bench_folder_ingest.py --task-inbox /path/to/zips --limit-files 4 --input-format both --lob-workers 2 --scratch-dir .axxeny-code/tmp
 ```
 
 ## Contributing
