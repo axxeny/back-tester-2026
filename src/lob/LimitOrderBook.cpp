@@ -54,30 +54,51 @@ std::string formatPrice(std::int64_t price) {
   return out.str();
 }
 
-template <class Levels>
-std::string formatLevels(const Levels &levels, std::size_t depth) {
-  std::ostringstream out;
-  out << '[';
-  std::size_t index = 0;
-  for (const auto &[price, size] : levels) {
-    if (index == depth) {
-      break;
-    }
-    if (index != 0) {
-      out << ", ";
-    }
-    out << formatPrice(price) << 'x' << size;
-    ++index;
-  }
-  out << ']';
-  return out.str();
-}
-
 std::string formatTop(const std::optional<PriceLevel> &level) {
   if (!level.has_value()) {
     return "none";
   }
   return formatPrice(level->price) + 'x' + std::to_string(level->size);
+}
+
+template <class Levels>
+std::vector<PriceLevel> collectLevels(const Levels &levels, std::size_t depth) {
+  std::vector<PriceLevel> result;
+  result.reserve(std::min(depth, levels.size()));
+  std::size_t index = 0;
+  for (const auto &[price, size] : levels) {
+    if (index == depth) {
+      break;
+    }
+    result.push_back(PriceLevel{price, size});
+    ++index;
+  }
+  return result;
+}
+
+std::string formatCollectedLevels(const std::vector<PriceLevel> &levels) {
+  std::ostringstream out;
+  out << '[';
+  for (std::size_t i = 0; i < levels.size(); ++i) {
+    if (i != 0) {
+      out << ", ";
+    }
+    out << formatPrice(levels[i].price) << 'x' << levels[i].size;
+  }
+  out << ']';
+  return out.str();
+}
+
+std::string formatSnapshot(const BookSnapshotData &snapshot) {
+  std::ostringstream out;
+  out << "instrument=" << snapshot.instrument_id << " orders="
+      << snapshot.orders << " bid_levels=" << snapshot.bid_levels
+      << " ask_levels=" << snapshot.ask_levels
+      << " best_bid=" << formatTop(snapshot.best_bid)
+      << " best_ask=" << formatTop(snapshot.best_ask)
+      << " bids=" << formatCollectedLevels(snapshot.bids)
+      << " asks=" << formatCollectedLevels(snapshot.asks);
+  return out.str();
 }
 
 } // namespace
@@ -141,13 +162,20 @@ bool LimitOrderBook::hasOrder(std::uint16_t publisher_id,
 }
 
 std::string LimitOrderBook::snapshotString(std::size_t depth) const {
-  std::ostringstream out;
-  out << "instrument=" << instrument_id_ << " orders=" << orderCount()
-      << " bid_levels=" << bidLevelCount() << " ask_levels=" << askLevelCount()
-      << " best_bid=" << formatTop(bestBid())
-      << " best_ask=" << formatTop(bestAsk()) << " bids="
-      << formatLevels(bids_, depth) << " asks=" << formatLevels(asks_, depth);
-  return out.str();
+  return formatSnapshot(snapshotData(depth));
+}
+
+BookSnapshotData LimitOrderBook::snapshotData(std::size_t depth) const {
+  return BookSnapshotData{
+      .instrument_id = instrument_id_,
+      .orders = orderCount(),
+      .bid_levels = bidLevelCount(),
+      .ask_levels = askLevelCount(),
+      .best_bid = bestBid(),
+      .best_ask = bestAsk(),
+      .bids = collectLevels(bids_, depth),
+      .asks = collectLevels(asks_, depth),
+  };
 }
 
 std::size_t

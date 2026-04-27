@@ -23,7 +23,9 @@ def find_default_inbox(repo_root: Path) -> Path | None:
 
 @dataclass
 class BenchRow:
+    input_format: str
     strategy: str
+    lob_workers: int
     files: int
     messages: int
     elapsed_sec: float
@@ -38,6 +40,10 @@ def parse_args() -> argparse.Namespace:
     repo_root = Path(__file__).resolve().parents[1]
     default_binary = repo_root / "build" / "bin" / "back-tester"
     default_inbox = find_default_inbox(repo_root)
+    default_python = repo_root / ".venv" / "bin" / "python3"
+    if not default_python.exists():
+        default_python = Path(sys.executable)
+    default_converter = repo_root / "scripts" / "convert_to_feather.py"
 
     parser = argparse.ArgumentParser(
         description=(
@@ -96,6 +102,36 @@ def parse_args() -> argparse.Namespace:
     )
     parser.add_argument("--csv-out", type=Path, default=None)
     parser.add_argument("--md-out", type=Path, default=None)
+    parser.add_argument(
+        "--input-format",
+        choices=("json", "feather", "both"),
+        default="json",
+        help="Bench JSON input, Feather input, or both.",
+    )
+    parser.add_argument(
+        "--lob-workers",
+        type=int,
+        default=1,
+        help="Pass through to back-tester --lob-workers.",
+    )
+    parser.add_argument(
+        "--snapshot-mode",
+        choices=("async", "sync"),
+        default="async",
+        help="Pass through to back-tester --snapshot-mode.",
+    )
+    parser.add_argument(
+        "--python",
+        type=Path,
+        default=default_python,
+        help="Python executable used for Feather conversion.",
+    )
+    parser.add_argument(
+        "--converter",
+        type=Path,
+        default=default_converter,
+        help="Path to scripts/convert_to_feather.py.",
+    )
     return parser.parse_args()
 
 
@@ -156,7 +192,63 @@ def parse_summary(stdout: str) -> dict[str, str]:
     return result
 
 
-def bench_strategy(binary: Path, input_dir: Path, strategy: str) -> BenchRow:
+def detect_folder_format(input_dir: Path) -> str:
+    suffixes = {
+        path.suffix
+        for path in input_dir.iterdir()
+        if path.is_file() and path.suffix in {".json", ".ndjson", ".feather"}
+    }
+    if not suffixes:
+        raise FileNotFoundError(
+            f"No .json, .ndjson, or .feather files found in {input_dir}"
+        )
+    if suffixes == {".feather"}:
+        return "feather"
+    if suffixes <= {".json", ".ndjson"}:
+        return "json"
+    raise ValueError(
+        f"Mixed input formats in {input_dir}. Keep folder to one of json/ndjson or feather."
+    )
+
+
+def require_feather_tools(python: Path, converter: Path) -> None:
+    if not python.exists():
+        raise FileNotFoundError(
+            f"Python executable not found: {python}. Run `uv sync --group feather --no-dev` or pass --python."
+        )
+    if not converter.is_file():
+        raise FileNotFoundError(f"Feather converter not found: {converter}")
+
+
+def make_feather_folder(
+    *, python: Path, converter: Path, input_dir: Path, output_dir: Path
+) -> Path:
+    if detect_folder_format(input_dir) == "feather":
+        return input_dir
+    output_dir.mkdir(parents=True, exist_ok=True)
+    inputs = sorted(
+        path
+        for path in input_dir.iterdir()
+        if path.is_file() and path.suffix in {".json", ".ndjson"}
+    )
+    subprocess.run(
+        [str(python), str(converter), *map(str, inputs), "--out-dir", str(output_dir)],
+        capture_output=True,
+        text=True,
+        check=True,
+    )
+    return output_dir
+
+
+def bench_strategy(
+    binary: Path,
+    input_dir: Path,
+    strategy: str,
+    *,
+    input_format: str,
+    lob_workers: int,
+    snapshot_mode: str,
+) -> BenchRow:
     result = subprocess.run(
         [
             str(binary),
@@ -165,6 +257,10 @@ def bench_strategy(binary: Path, input_dir: Path, strategy: str) -> BenchRow:
             strategy,
             "--preview-limit",
             "0",
+            "--lob-workers",
+            str(lob_workers),
+            "--snapshot-mode",
+            snapshot_mode,
         ],
         capture_output=True,
         text=True,
@@ -172,11 +268,13 @@ def bench_strategy(binary: Path, input_dir: Path, strategy: str) -> BenchRow:
     )
 
     if result.returncode != 0:
-        return BenchRow(strategy, 0, 0, 0.0, 0.0, 0, 0, 0, result.returncode)
+        return BenchRow(input_format, strategy, lob_workers, 0, 0, 0.0, 0.0, 0, 0, 0, result.returncode)
 
     summary = parse_summary(result.stdout)
     return BenchRow(
+        input_format=input_format,
         strategy=summary["strategy"],
+        lob_workers=lob_workers,
         files=int(summary["files"]),
         messages=int(summary["total"]),
         elapsed_sec=float(summary["elapsed_sec"]),
@@ -196,7 +294,9 @@ def write_csv(path: Path, rows: list[BenchRow]) -> None:
         for row in rows:
             writer.writerow(
                 [
+                    row.input_format,
                     row.strategy,
+                    row.lob_workers,
                     row.files,
                     row.messages,
                     f"{row.elapsed_sec:.6f}",
@@ -211,17 +311,20 @@ def write_csv(path: Path, rows: list[BenchRow]) -> None:
 
 def write_markdown(path: Path, rows: list[BenchRow], input_dir: Path) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
+    strategies = ", ".join(sorted({row.strategy for row in rows}))
+    formats = ", ".join(sorted({row.input_format for row in rows}))
     with path.open("w") as fh:
         fh.write("# Hard Ingest Bench\n\n")
         fh.write(f"- input_dir: `{input_dir}`\n")
-        fh.write(f"- strategies: {', '.join(row.strategy for row in rows)}\n\n")
+        fh.write(f"- strategies: {strategies}\n")
+        fh.write(f"- formats: {formats}\n\n")
         fh.write(
-            "| strategy | files | messages | elapsed_sec | msgs_per_sec | skipped_rtype | skipped_parse | out_of_order | exit |\n"
+            "| format | strategy | workers | files | messages | elapsed_sec | msgs_per_sec | skipped_rtype | skipped_parse | out_of_order | exit |\n"
         )
-        fh.write("|---|---:|---:|---:|---:|---:|---:|---:|---:|\n")
+        fh.write("|---|---|---:|---:|---:|---:|---:|---:|---:|---:|---:|\n")
         for row in rows:
             fh.write(
-                f"| `{row.strategy}` | {row.files} | {row.messages} | "
+                f"| `{row.input_format}` | `{row.strategy}` | {row.lob_workers} | {row.files} | {row.messages} | "
                 f"{row.elapsed_sec:.6f} | {row.msgs_per_sec:.2f} | "
                 f"{row.skipped_rtype} | {row.skipped_parse} | "
                 f"{row.out_of_order_ts_recv} | {row.exit_code} |\n"
@@ -249,17 +352,51 @@ def main() -> int:
             extract_count = extract_members(args, extracted_dir)
             input_dir = extracted_dir
             print(f"extracted_files={extract_count}")
+        source_format = detect_folder_format(input_dir)
+        if args.input_format in {"feather", "both"}:
+            require_feather_tools(args.python, args.converter)
+        if source_format == "feather" and args.input_format in {"json", "both"}:
+            raise ValueError(
+                "Input dir already feather-only. For JSON-vs-Feather comparison, pass original json folder or zips."
+            )
 
-        rows = [
-            bench_strategy(args.binary, input_dir, "flat"),
-            bench_strategy(args.binary, input_dir, "hierarchy"),
-        ]
+        rows: list[BenchRow] = []
+        formats = ["json", "feather"] if args.input_format == "both" else [args.input_format]
+        for input_format in formats:
+            format_dir = input_dir
+            if input_format == "feather":
+                format_dir = make_feather_folder(
+                    python=args.python,
+                    converter=args.converter,
+                    input_dir=input_dir,
+                    output_dir=extracted_dir / "feather",
+                )
+            rows.extend(
+                [
+                    bench_strategy(
+                        args.binary,
+                        format_dir,
+                        "flat",
+                        input_format=input_format,
+                        lob_workers=args.lob_workers,
+                        snapshot_mode=args.snapshot_mode,
+                    ),
+                    bench_strategy(
+                        args.binary,
+                        format_dir,
+                        "hierarchy",
+                        input_format=input_format,
+                        lob_workers=args.lob_workers,
+                        snapshot_mode=args.snapshot_mode,
+                    ),
+                ]
+            )
 
         for row in rows:
             print(
-                f"strategy={row.strategy},files={row.files},messages={row.messages},"
-                f"elapsed_sec={row.elapsed_sec:.6f},msgs_per_sec={row.msgs_per_sec:.2f},"
-                f"exit={row.exit_code}"
+                f"format={row.input_format},strategy={row.strategy},workers={row.lob_workers},"
+                f"files={row.files},messages={row.messages},elapsed_sec={row.elapsed_sec:.6f},"
+                f"msgs_per_sec={row.msgs_per_sec:.2f},exit={row.exit_code}"
             )
 
         if any(row.exit_code != 0 for row in rows):

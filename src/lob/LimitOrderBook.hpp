@@ -19,6 +19,17 @@ struct PriceLevel {
   std::uint64_t size{0};
 };
 
+struct BookSnapshotData {
+  std::uint32_t instrument_id{0};
+  std::size_t orders = 0;
+  std::size_t bid_levels = 0;
+  std::size_t ask_levels = 0;
+  std::optional<PriceLevel> best_bid;
+  std::optional<PriceLevel> best_ask;
+  std::vector<PriceLevel> bids;
+  std::vector<PriceLevel> asks;
+};
+
 struct ApplyResult {
   bool missing_order = false;
   bool ignored = false;
@@ -42,6 +53,7 @@ public:
   [[nodiscard]] std::uint32_t instrumentId() const noexcept {
     return instrument_id_;
   }
+  [[nodiscard]] BookSnapshotData snapshotData(std::size_t depth = 5) const;
   [[nodiscard]] std::string snapshotString(std::size_t depth = 5) const;
 
 private:

@@ -3,8 +3,9 @@
 
 #include "common/MarketDataEvent.hpp"
 #include "ingest/FolderIngest.hpp"
-#include "ingest/NdjsonReader.hpp"
+#include "ingest/MarketDataFile.hpp"
 #include "lob/BookDispatcher.hpp"
+#include "lob/ShardedBookDispatcher.hpp"
 
 #include <algorithm>
 #include <charconv>
@@ -13,6 +14,7 @@
 #include <exception>
 #include <filesystem>
 #include <iostream>
+#include <memory>
 #include <stdexcept>
 #include <string>
 #include <string_view>
@@ -35,6 +37,11 @@ enum class StrategySelection {
   Both,
 };
 
+enum class SnapshotMode {
+  Async,
+  Sync,
+};
+
 struct CliOptions {
   std::filesystem::path input_path;
   StrategySelection strategy = StrategySelection::Default;
@@ -43,6 +50,8 @@ struct CliOptions {
   std::size_t snapshot_depth = 5;
   std::size_t max_snapshots = 3;
   std::size_t final_books_limit = 20;
+  std::size_t lob_workers = 1;
+  SnapshotMode snapshot_mode = SnapshotMode::Async;
 };
 
 struct PreviewState {
@@ -98,7 +107,7 @@ struct PreviewState {
 
 struct ReplayState {
   PreviewState *preview = nullptr;
-  BookDispatcher *dispatcher = nullptr;
+  DispatcherEngine *dispatcher = nullptr;
 
   void consume(const MarketDataEvent &event) const {
     if (preview != nullptr) {
@@ -117,7 +126,8 @@ ReplayState *gReplay = nullptr;
       std::string(message) +
       "\nusage: back-tester <path> [--strategy flat|hierarchy|both] "
       "[--preview-limit N] [--snapshot-every N] [--snapshot-depth N] "
-      "[--max-snapshots N] [--final-books-limit N]");
+      "[--max-snapshots N] [--final-books-limit N] [--lob-workers N] "
+      "[--snapshot-mode async|sync]");
 }
 
 StrategySelection parseStrategySelection(std::string_view value) {
@@ -142,6 +152,16 @@ std::size_t parseCount(std::string_view value, std::string_view name) {
     usageError(std::string("invalid ") + std::string(name));
   }
   return parsed;
+}
+
+SnapshotMode parseSnapshotMode(std::string_view value) {
+  if (value == "async") {
+    return SnapshotMode::Async;
+  }
+  if (value == "sync") {
+    return SnapshotMode::Sync;
+  }
+  usageError("invalid snapshot mode");
 }
 
 CliOptions parseCli(int argc, const char *argv[]) {
@@ -196,6 +216,20 @@ CliOptions parseCli(int argc, const char *argv[]) {
       options.final_books_limit = parseCount(argv[++i], "final books limit");
       continue;
     }
+    if (arg == "--lob-workers") {
+      if (i + 1 >= argc) {
+        usageError("missing value for --lob-workers");
+      }
+      options.lob_workers = parseCount(argv[++i], "lob workers");
+      continue;
+    }
+    if (arg == "--snapshot-mode") {
+      if (i + 1 >= argc) {
+        usageError("missing value for --snapshot-mode");
+      }
+      options.snapshot_mode = parseSnapshotMode(argv[++i]);
+      continue;
+    }
     usageError("unknown argument");
   }
 
@@ -207,10 +241,11 @@ DispatchOptions toDispatchOptions(const CliOptions &options) {
       .snapshot_every = options.snapshot_every,
       .max_snapshots = options.max_snapshots,
       .snapshot_depth = options.snapshot_depth,
+      .async_snapshots = options.snapshot_mode == SnapshotMode::Async,
   };
 }
 
-void printBookSnapshots(const BookDispatcher &dispatcher) {
+void printBookSnapshots(const DispatcherEngine &dispatcher) {
   if (dispatcher.snapshots().empty()) {
     return;
   }
@@ -222,7 +257,7 @@ void printBookSnapshots(const BookDispatcher &dispatcher) {
   }
 }
 
-void printFinalBooks(const BookDispatcher &dispatcher, std::size_t limit) {
+void printFinalBooks(const DispatcherEngine &dispatcher, std::size_t limit) {
   const auto summaries = dispatcher.finalSummaries(1);
   if (summaries.empty()) {
     return;
@@ -253,16 +288,31 @@ void printDispatcherSummary(const DispatchStats &stats) {
             << " none=" << stats.none;
 }
 
+const char *snapshotModeName(SnapshotMode mode) noexcept {
+  switch (mode) {
+  case SnapshotMode::Async:
+    return "async";
+  case SnapshotMode::Sync:
+    return "sync";
+  }
+  return "unknown";
+}
+
 void printSingleFileSummary(const IngestStats &stats,
                             const DispatchStats &dispatch,
+                            const CliOptions &options,
+                            InputFormat format,
                             double elapsed_sec) {
   std::cout << "\n"
-            << "total=" << stats.consumed
+            << "input_format=" << inputFormatName(format)
+            << " total=" << stats.consumed
             << " skipped_rtype=" << stats.skipped_rtype
             << " skipped_parse=" << stats.skipped_parse
             << " first_ts_recv=" << stats.first_ts_recv
             << " last_ts_recv=" << stats.last_ts_recv
             << " out_of_order_ts_recv=" << stats.out_of_order_ts_recv
+            << " lob_workers=" << options.lob_workers
+            << " snapshot_mode=" << snapshotModeName(options.snapshot_mode)
             << " elapsed_sec=" << elapsed_sec
             << " msgs_per_sec="
             << (elapsed_sec > 0.0 ? static_cast<double>(stats.consumed) /
@@ -273,7 +323,8 @@ void printSingleFileSummary(const IngestStats &stats,
 }
 
 void printFolderSummary(const FolderIngestStats &stats,
-                        const DispatchStats &dispatch) {
+                        const DispatchStats &dispatch,
+                        const CliOptions &options) {
   std::cout << "\n"
             << "strategy=" << mergeStrategyName(stats.strategy)
             << " files=" << stats.files << " total=" << stats.total
@@ -284,47 +335,62 @@ void printFolderSummary(const FolderIngestStats &stats,
             << " out_of_order_ts_recv=" << stats.out_of_order_ts_recv
             << " producer_out_of_order_ts_recv="
             << stats.producer_out_of_order_ts_recv
+            << " lob_workers=" << options.lob_workers
+            << " snapshot_mode=" << snapshotModeName(options.snapshot_mode)
             << " elapsed_sec=" << stats.elapsed_sec
             << " msgs_per_sec=" << stats.msgsPerSec();
   printDispatcherSummary(dispatch);
   std::cout << '\n';
 }
 
+std::unique_ptr<DispatcherEngine> makeDispatcher(const CliOptions &options) {
+  const DispatchOptions dispatch_options = toDispatchOptions(options);
+  if (options.lob_workers <= 1) {
+    return std::make_unique<BookDispatcher>(dispatch_options);
+  }
+  return std::make_unique<ShardedBookDispatcher>(
+      dispatch_options,
+      ShardedDispatchOptions{.worker_count = options.lob_workers});
+}
+
 void runSingleFile(const std::filesystem::path &path, const CliOptions &options) {
   PreviewState preview(options.preview_limit);
-  BookDispatcher dispatcher(toDispatchOptions(options));
-  ReplayState replay{.preview = &preview, .dispatcher = &dispatcher};
+  auto dispatcher = makeDispatcher(options);
+  ReplayState replay{.preview = &preview, .dispatcher = dispatcher.get()};
   gReplay = &replay;
 
   const auto started = std::chrono::steady_clock::now();
-  const IngestStats stats = parseNdjsonFile(path, &processMarketDataEvent);
+  const InputFormat format = detectInputFormat(path);
+  const IngestStats stats = parseMarketDataFile(path, &processMarketDataEvent);
   const auto finished = std::chrono::steady_clock::now();
   gReplay = nullptr;
+  dispatcher->finish();
 
   const double elapsed_sec =
       std::chrono::duration<double>(finished - started).count();
   preview.printTail();
-  printBookSnapshots(dispatcher);
-  printFinalBooks(dispatcher, options.final_books_limit);
-  printSingleFileSummary(stats, dispatcher.stats(), elapsed_sec);
+  printBookSnapshots(*dispatcher);
+  printFinalBooks(*dispatcher, options.final_books_limit);
+  printSingleFileSummary(stats, dispatcher->stats(), options, format, elapsed_sec);
 }
 
 void runFolderStrategy(const std::filesystem::path &path, MergeStrategy strategy,
                        const CliOptions &options) {
   std::cout << "--- strategy=" << mergeStrategyName(strategy) << " ---\n";
   PreviewState preview(options.preview_limit);
-  BookDispatcher dispatcher(toDispatchOptions(options));
-  ReplayState replay{.preview = &preview, .dispatcher = &dispatcher};
+  auto dispatcher = makeDispatcher(options);
+  ReplayState replay{.preview = &preview, .dispatcher = dispatcher.get()};
   gReplay = &replay;
 
   const FolderIngestStats stats =
       ingestFolder(path, strategy, &processMarketDataEvent);
   gReplay = nullptr;
+  dispatcher->finish();
 
   preview.printTail();
-  printBookSnapshots(dispatcher);
-  printFinalBooks(dispatcher, options.final_books_limit);
-  printFolderSummary(stats, dispatcher.stats());
+  printBookSnapshots(*dispatcher);
+  printFinalBooks(*dispatcher, options.final_books_limit);
+  printFolderSummary(stats, dispatcher->stats(), options);
 }
 
 } // namespace

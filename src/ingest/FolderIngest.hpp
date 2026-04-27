@@ -7,7 +7,7 @@
 #pragma once
 
 #include "common/MarketDataEvent.hpp"
-#include "ingest/NdjsonReader.hpp"
+#include "ingest/MarketDataFile.hpp"
 
 #include <cstddef>
 #include <cstdint>
@@ -54,7 +54,7 @@ struct FolderIngestStats {
 };
 
 std::vector<std::filesystem::path>
-listNdjsonFiles(const std::filesystem::path &folder);
+listMarketDataFiles(const std::filesystem::path &folder);
 
 FolderIngestStats ingestFolder(const std::filesystem::path &folder,
                                MergeStrategy strategy,

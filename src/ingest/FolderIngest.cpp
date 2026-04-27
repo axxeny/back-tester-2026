@@ -166,7 +166,7 @@ void producerThread(const std::filesystem::path &path, std::uint32_t source_inde
                     std::size_t batch_size, RunControl &control) {
   try {
     EventBlock block = makeBlock(batch_size);
-    result.stats = parseNdjsonFile(
+    result.stats = parseMarketDataFile(
         path, MarketDataEventVisitor{[&](const MarketDataEvent &event) {
           if (control.cancelled()) {
             return false;
@@ -322,35 +322,6 @@ const char *mergeStrategyName(MergeStrategy strategy) noexcept {
   return "unknown";
 }
 
-std::vector<std::filesystem::path>
-listNdjsonFiles(const std::filesystem::path &folder) {
-  if (!std::filesystem::exists(folder)) {
-    throw std::runtime_error("ingestFolder: path does not exist: " +
-                             folder.string());
-  }
-  if (!std::filesystem::is_directory(folder)) {
-    throw std::runtime_error("ingestFolder: expected directory: " +
-                             folder.string());
-  }
-
-  std::vector<std::filesystem::path> files;
-  for (const auto &entry : std::filesystem::directory_iterator(folder)) {
-    if (!entry.is_regular_file()) {
-      continue;
-    }
-    const auto ext = entry.path().extension().string();
-    if (ext == ".json" || ext == ".ndjson") {
-      files.push_back(entry.path());
-    }
-  }
-  std::sort(files.begin(), files.end());
-  if (files.empty()) {
-    throw std::runtime_error("ingestFolder: no .json or .ndjson files in " +
-                             folder.string());
-  }
-  return files;
-}
-
 FolderIngestStats ingestFolder(const std::filesystem::path &folder,
                                MergeStrategy strategy,
                                const MarketDataEventConsumer &consumer,
@@ -363,7 +334,7 @@ FolderIngestStats ingestFolder(const std::filesystem::path &folder,
     throw std::invalid_argument("ingestFolder: batch_size must be >= 1");
   }
 
-  const auto files = listNdjsonFiles(folder);
+  const auto files = listMarketDataFiles(folder);
   RunControl control;
   std::vector<std::thread> producer_threads;
   std::vector<std::thread> merger_threads;

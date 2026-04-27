@@ -40,6 +40,7 @@ TEST_CASE("BookDispatcher routes explicit instrument events and captures snapsho
                              2, 1, 3));
   dispatcher.apply(
       makeEvent(11, 202, MdAction::Add, MdSide::Ask, 2'100'000'000LL, 3, 1, 4));
+  dispatcher.finish();
 
   REQUIRE(dispatcher.stats().total_events == 4);
   REQUIRE(dispatcher.stats().instruments == 2);
@@ -73,6 +74,7 @@ TEST_CASE("BookDispatcher resolves missing instrument ids when order is unique",
   MarketDataEvent cancel_without_instrument =
       makeEvent(0, 700, MdAction::Cancel, MdSide::Bid, UNDEF_PRICE, 4, 9, 2);
   dispatcher.apply(cancel_without_instrument);
+  dispatcher.finish();
 
   REQUIRE(dispatcher.stats().unresolved_routes == 0);
   REQUIRE(dispatcher.stats().ambiguous_routes == 0);
@@ -90,6 +92,7 @@ TEST_CASE("BookDispatcher flags ambiguous missing-instrument routing",
   MarketDataEvent cancel_without_instrument =
       makeEvent(0, 700, MdAction::Cancel, MdSide::Bid, UNDEF_PRICE, 1, 9, 3);
   dispatcher.apply(cancel_without_instrument);
+  dispatcher.finish();
 
   REQUIRE(dispatcher.stats().ambiguous_routes == 1);
   const auto summaries = dispatcher.finalSummaries();

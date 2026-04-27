@@ -6,6 +6,7 @@ set(CMAKE_MODULE_PATH ${CMAKE_MODULE_PATH} "${CMAKE_SOURCE_DIR}/cmake")
 
 include(cmake/GlobalSettings.cmake)
 include(cmake/ThirdPartyLibs.cmake)
+include(cmake/PyArrowFeather.cmake)
 include(cmake/GenerateVersionFile.cmake)
 
 add_subdirectory(src)

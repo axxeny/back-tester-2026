@@ -21,3 +21,6 @@ distribution = false
 dev = [
     "pre-commit>=4.5.1",
 ]
+feather = [
+    "pyarrow>=24.0.0,<25",
+]

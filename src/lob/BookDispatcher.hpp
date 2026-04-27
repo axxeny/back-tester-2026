@@ -3,12 +3,16 @@
 #pragma once
 
 #include "lob/LimitOrderBook.hpp"
+#include "ingest/BlockingQueue.hpp"
 
 #include <cstddef>
 #include <cstdint>
 #include <map>
+#include <memory>
+#include <mutex>
 #include <optional>
 #include <string>
+#include <thread>
 #include <vector>
 
 namespace cmf {
@@ -17,6 +21,8 @@ struct DispatchOptions {
   std::size_t snapshot_every = 100'000;
   std::size_t max_snapshots = 3;
   std::size_t snapshot_depth = 5;
+  bool async_snapshots = true;
+  std::size_t snapshot_queue_capacity = 32;
 };
 
 struct DispatchStats {
@@ -52,32 +58,63 @@ struct CapturedSnapshot {
   BookSummary book;
 };
 
-class BookDispatcher {
+class DispatcherEngine {
+public:
+  virtual ~DispatcherEngine() = default;
+  virtual void apply(const MarketDataEvent &event) = 0;
+  virtual void finish() = 0;
+  [[nodiscard]] virtual const DispatchStats &stats() const noexcept = 0;
+  [[nodiscard]] virtual const std::vector<CapturedSnapshot> &
+  snapshots() const noexcept = 0;
+  [[nodiscard]] virtual std::vector<BookSummary>
+  finalSummaries(std::size_t depth = 1) const = 0;
+};
+
+class BookDispatcher : public DispatcherEngine {
 public:
   explicit BookDispatcher(DispatchOptions options = {});
+  ~BookDispatcher() override;
 
-  void apply(const MarketDataEvent &event);
+  void apply(const MarketDataEvent &event) override;
+  void finish() override;
 
-  [[nodiscard]] const DispatchStats &stats() const noexcept { return stats_; }
-  [[nodiscard]] const std::vector<CapturedSnapshot> &snapshots() const noexcept {
+  [[nodiscard]] const DispatchStats &stats() const noexcept override {
+    return stats_;
+  }
+  [[nodiscard]] const std::vector<CapturedSnapshot> &snapshots() const noexcept override {
     return snapshots_;
   }
   [[nodiscard]] std::vector<BookSummary>
-  finalSummaries(std::size_t depth = 1) const;
+  finalSummaries(std::size_t depth = 1) const override;
+  [[nodiscard]] std::optional<BookSummary>
+  summaryForInstrument(std::uint32_t instrument_id, std::size_t depth = 1) const;
 
 private:
+  struct PendingSnapshot {
+    std::size_t event_index = 0;
+    std::uint64_t ts_recv = UNDEF_TIMESTAMP;
+    BookSnapshotData snapshot;
+  };
+
   LimitOrderBook &getOrCreateBook(std::uint32_t instrument_id);
   std::optional<std::uint32_t>
   resolveInstrumentId(const MarketDataEvent &event, bool &ambiguous) const;
+  [[nodiscard]] static BookSummary summarise(const BookSnapshotData &snapshot);
   [[nodiscard]] BookSummary summarise(const LimitOrderBook &book,
                                       std::size_t depth) const;
   void maybeCaptureSnapshot(const LimitOrderBook &book,
                             const MarketDataEvent &event);
+  void closeSnapshotWorker();
+  void snapshotWorkerLoop();
 
   DispatchOptions options_{};
   DispatchStats stats_{};
   std::map<std::uint32_t, LimitOrderBook> books_;
   std::vector<CapturedSnapshot> snapshots_;
+  std::unique_ptr<BlockingQueue<PendingSnapshot>> snapshot_queue_;
+  std::thread snapshot_worker_;
+  std::mutex snapshots_mutex_;
+  bool snapshots_closed_ = false;
 };
 
 } // namespace cmf
