@@ -65,11 +65,26 @@ endmacro()
 list(APPEND COMPONENT_DIR_LIST "SRC" ${CMAKE_SOURCE_DIR})
 
 # add all 3rdparty libs as components
-GetSubdirectories(${CMAKE_SOURCE_DIR}/3rdparty libs)
-foreach(lib ${libs})
-    list(APPEND COMPONENT_DIR_LIST ${lib} ${CMAKE_SOURCE_DIR}/3rdparty/${lib})
-    list(APPEND THIRD_PARTY_COMPONENTS ${lib})
-endforeach()
+if(EXISTS ${CMAKE_SOURCE_DIR}/3rdparty)
+    GetSubdirectories(${CMAKE_SOURCE_DIR}/3rdparty libs)
+    foreach(lib ${libs})
+        list(APPEND COMPONENT_DIR_LIST ${lib} ${CMAKE_SOURCE_DIR}/3rdparty/${lib})
+        list(APPEND LOCAL_THIRD_PARTY_DEPENDS ${CMAKE_SOURCE_DIR}/3rdparty/${lib})
+        list(APPEND THIRD_PARTY_COMPONENTS ${lib})
+    endforeach()
+endif()
+
+if(NOT THIRD_PARTY_COMPONENTS)
+    if(TARGET simdjson::simdjson)
+        list(APPEND THIRD_PARTY_COMPONENTS simdjson)
+    endif()
+    if(TARGET Catch2::Catch2WithMain)
+        list(APPEND THIRD_PARTY_COMPONENTS Catch2)
+    endif()
+    if(TARGET arrow::arrow)
+        list(APPEND THIRD_PARTY_COMPONENTS Arrow)
+    endif()
+endif()
 
 print_message("Third party libs:   ${THIRD_PARTY_COMPONENTS}")
 print_message("----------------------------------------")
@@ -81,6 +96,6 @@ configure_file(${CMAKE_SOURCE_DIR}/src/Version.hpp.in ${CMAKE_BINARY_DIR}/includ
 # regenerate Version.hpp on the build step
 add_custom_target(GenerateVersion
     COMMAND ${CMAKE_COMMAND} -DDISABLE_PRINT=1 .
-    DEPENDS ${CMAKE_SOURCE_DIR}/src/Version.hpp.in ${THIRD_PARTY_COMPONENTS}
+    DEPENDS ${CMAKE_SOURCE_DIR}/src/Version.hpp.in ${LOCAL_THIRD_PARTY_DEPENDS}
     COMMENT "Configuring Version.hpp"
 )

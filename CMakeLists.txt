@@ -5,8 +5,12 @@ project(back-tester VERSION 0.0.1 DESCRIPTION "CMF back-tester" LANGUAGES CXX C)
 set(CMAKE_MODULE_PATH ${CMAKE_MODULE_PATH} "${CMAKE_SOURCE_DIR}/cmake")
 
 include(cmake/GlobalSettings.cmake)
-include(cmake/ThirdPartyLibs.cmake)
-include(cmake/PyArrowFeather.cmake)
+
+find_package(simdjson REQUIRED CONFIG)
+if(BUILD_TESTS)
+    find_package(Catch2 REQUIRED CONFIG)
+endif()
+include(cmake/ArrowFeather.cmake)
 include(cmake/GenerateVersionFile.cmake)
 
 add_subdirectory(src)

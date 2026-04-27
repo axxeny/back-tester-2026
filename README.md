@@ -4,7 +4,6 @@
 
 ```
 .
-├── 3rdparty                    # place holder for 3rd party libraries (downloaded during the build)
 ├── build                       # local build tree used by CMake
 ├    ├── bin                    # generated binaries
 ├    ├── lib                    # generated libs (including those, which are built from 3rd party sources)
@@ -30,59 +29,55 @@ Other users are encouraged to add the corresponding instructions for required st
 
 ## Build
 
-Install dependencies once:
+Install build dependencies once:
 
 ```
-sudo apt install -y cmake g++ clang-format
+sudo apt install -y cmake g++ clang-format python3-pip
+python3 -m pip install --user "conan>=2,<3"
 ```
 
-Build using cmake:
+Detect a Conan profile once:
 
 ```
-cmake -B build -S .
-cmake --build build -j
+conan profile detect --force
 ```
 
-Local reproducible Feather env:
+On macOS CommandLineTools-only setups, Conan source builds may also need the Apple
+SDK flags exported during `conan install`:
 
 ```bash
-uv sync --group feather --no-dev
-cmake -S . -B build
-cmake --build build -j
+export CFLAGS='-isysroot /Library/Developer/CommandLineTools/SDKs/MacOSX.sdk'
+export CXXFLAGS='-isysroot /Library/Developer/CommandLineTools/SDKs/MacOSX.sdk -isystem /Library/Developer/CommandLineTools/SDKs/MacOSX.sdk/usr/include/c++/v1'
 ```
 
-If repo-local `.venv` has `pyarrow`, CMake auto-detects Arrow headers/libs from it and enables Feather ingest. Without that group, build still works but Feather input stays disabled at runtime.
+Install C++ dependencies with Conan, then configure and build with the generated toolchain:
 
-or
+```bash
+conan install . --build=missing -s build_type=Release
+cmake -S . -B build/Release \
+  -DCMAKE_BUILD_TYPE=Release \
+  -DCMAKE_TOOLCHAIN_FILE=build/Release/generators/conan_toolchain.cmake
+cmake --build build/Release -j
+```
 
+If you do not need Feather ingest support, skip Arrow entirely:
+
+```bash
+conan install . --build=missing -s build_type=Release -o '&:with_feather=False'
+cmake -S . -B build/Release \
+  -DCMAKE_BUILD_TYPE=Release \
+  -DCMAKE_TOOLCHAIN_FILE=build/Release/generators/conan_toolchain.cmake
+cmake --build build/Release -j
 ```
-mkdir -p build
-pushd build
-cmake ..
-make -j VERBOSE=1
-popd
-```
+
+`simdjson`, `Catch2`, and Arrow C++ now come from Conan instead of `ExternalProject` downloads or borrowing headers/libs from a Python wheel.
 
 ## Test
 
 To run unit tests:
 
 ```
-ctest --test-dir build -j
-```
-
-or
-
-```
-pushd build
-ctest -j
-popd
-```
-
-or
-
-```
-build/bin/test/back-tester-tests
+ctest --test-dir build/Release --output-on-failure
 ```
 
 ## Run
@@ -90,7 +85,7 @@ build/bin/test/back-tester-tests
 Back-tester:
 
 ```
-build/bin/back-tester
+build/Release/bin/back-tester
 ```
 
 Smoke test against one real zipped Databento file:
@@ -102,13 +97,13 @@ python3 scripts/smoke_ingest.py --zip /path/to/day.zip
 Hard-variant run against an extracted folder of daily JSON files:
 
 ```bash
-build/bin/back-tester /path/to/folder --strategy both --preview-limit 10
+build/Release/bin/back-tester /path/to/folder --strategy both --preview-limit 10
 ```
 
 Homework 2 style run with LOB snapshots and bounded final-book output:
 
 ```bash
-build/bin/back-tester /path/to/folder \
+build/Release/bin/back-tester /path/to/folder \
   --strategy both \
   --preview-limit 0 \
   --snapshot-every 500000 \
@@ -120,15 +115,16 @@ build/bin/back-tester /path/to/folder \
 Convert raw Databento NDJSON files into Feather:
 
 ```bash
+uv sync --group feather --no-dev
 .venv/bin/python scripts/convert_to_feather.py \
   /path/to/xeur-eobi-20260310.mbo.json \
   --out-dir build/feather
 ```
 
-Replay same file from Feather through C++ Arrow ingest:
+Replay same file from Feather through C++ Arrow ingest built via Conan:
 
 ```bash
-build/bin/back-tester build/feather/xeur-eobi-20260310.mbo.feather \
+build/Release/bin/back-tester build/feather/xeur-eobi-20260310.mbo.feather \
   --preview-limit 0 \
   --snapshot-every 500000 \
   --max-snapshots 2
@@ -170,17 +166,20 @@ Useful bounded runs:
 
 ## Contributing
 
-Install UV, create a virtual environment, and install the project dependencies:
+Install UV for Python helpers and Conan for C++ dependencies:
 
 ```bash
 curl -LsSf https://astral.sh/uv/install.sh | sh
 uv sync
+python3 -m pip install --user "conan>=2,<3"
 ```
 
-Then activate the virtual environment and set up the git pre-commit hooks:
+Then activate the virtual environment, install the C++ packages for your chosen build type, and set up the git pre-commit hooks:
 
 ```bash
 source .venv/bin/activate
+conan profile detect --force
+conan install . --build=missing -s build_type=Release
 pre-commit install
 ```
 
