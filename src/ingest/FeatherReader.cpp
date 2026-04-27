@@ -20,14 +20,14 @@ IngestStats parseFeatherFile(const std::filesystem::path &path,
                              const MarketDataEventVisitor &) {
   throw std::runtime_error(
       "parseFeatherFile: Feather ingest unavailable for " + path.string() +
-      ". Run `uv sync --group feather --no-dev` and reconfigure CMake.");
+      ". Run `conan install . --build=missing -s build_type=Release` and reconfigure CMake.");
 }
 
 IngestStats parseFeatherFile(const std::filesystem::path &path,
                              const MarketDataEventConsumer &) {
   throw std::runtime_error(
       "parseFeatherFile: Feather ingest unavailable for " + path.string() +
-      ". Run `uv sync --group feather --no-dev` and reconfigure CMake.");
+      ". Run `conan install . --build=missing -s build_type=Release` and reconfigure CMake.");
 }
 
 #else
