@@ -1,7 +1,8 @@
 #pragma once
-#include "LimitOrderBook.hpp"
+#include "SimulatedLOB.hpp"
 #include "MarketDataEvent.hpp"
 #include <unordered_map>
+#include <memory>
 #include <string>
 
 // Маршрутизатор событий -> LOB.
@@ -26,7 +27,7 @@ public:
 
 private:
     // instrument_id -> его LOB
-    std::unordered_map<long long, LimitOrderBook> lobs_;
+    std::unordered_map<long long, std::shared_ptr<HistoricalLOB>> lobs_;
     // instrument_id -> символ (для читаемого вывода)
     std::unordered_map<long long, std::string>    symbols_;
     std::size_t totalEventsRouted_ = 0;

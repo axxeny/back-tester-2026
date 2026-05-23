@@ -2,7 +2,7 @@
 
 #include "common/BasicTypes.hpp"
 
-#include "catch2/catch_all.hpp"
+#include "catch_amalgamated.hpp"
 
 using namespace cmf;
 

@@ -1,6 +1,9 @@
 #pragma once
 #include "MarketDataEvent.hpp"
+#include "BookTypes.hpp"
 #include <map>
+#include <optional>
+#include <vector>
 #include <unordered_map>
 #include <functional>
 #include <ostream>
@@ -24,6 +27,9 @@ public:
     // Суммарный объём на лучшем биде / аске
     long long bestBidSize() const;
     long long bestAskSize() const;
+
+    // Вернуть агрегированный snapshot стакана. depth=0 means all visible levels.
+    BookSnapshot snapshot(std::size_t depth = 0) const;
 
     // Вывести snapshot стакана (top N уровней с каждой стороны)
     void printSnapshot(std::ostream& os, int depth = 5) const;

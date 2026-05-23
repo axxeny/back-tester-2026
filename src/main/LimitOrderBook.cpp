@@ -57,6 +57,52 @@ void LimitOrderBook::onCancel(const MarketDataEvent& e) {
     ++totalCancels;
 }
 
+
+BookSnapshot LimitOrderBook::snapshot(std::size_t depth) const
+{
+    BookSnapshot result;
+
+    std::size_t count = 0;
+    for (const auto& [price, orders] : bids_)
+    {
+        if (depth != 0 && count >= depth)
+            break;
+
+        long long total = 0;
+        for (const auto& [orderId, size] : orders)
+        {
+            (void)orderId;
+            total += size;
+        }
+
+        if (total > 0)
+            result.bids.push_back(BookLevel{price, total});
+
+        ++count;
+    }
+
+    count = 0;
+    for (const auto& [price, orders] : asks_)
+    {
+        if (depth != 0 && count >= depth)
+            break;
+
+        long long total = 0;
+        for (const auto& [orderId, size] : orders)
+        {
+            (void)orderId;
+            total += size;
+        }
+
+        if (total > 0)
+            result.asks.push_back(BookLevel{price, total});
+
+        ++count;
+    }
+
+    return result;
+}
+
 void LimitOrderBook::printSnapshot(std::ostream& os, int depth) const {
     os << "  --- ASK ---\n";
     // Итерировать по аскам в обратном порядке чтобы показать сверху (дальние)

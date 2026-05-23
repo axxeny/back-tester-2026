@@ -1,5 +1,6 @@
 #include "LobRouter.hpp"
 #include <iostream>
+#include <memory>
 
 LobRouter::LobRouter(std::size_t interval) : snapshotInterval_(interval) {}
 
@@ -8,10 +9,12 @@ void LobRouter::route(const MarketDataEvent& event) {
     if (!event.symbol.empty())
         symbols_.emplace(event.instrumentId, event.symbol);
 
-    // Найти или создать LOB для данного instrument_id.
-    // operator[] создаёт LOB по умолчанию если не существует.
-    LimitOrderBook& lob = lobs_[event.instrumentId];
-    lob.applyEvent(event);
+
+    auto& lob = lobs_[event.instrumentId];
+    if (!lob)
+        lob = std::make_shared<HistoricalLOB>();
+
+    lob->applyEvent(event); // Обновление исторического basement-стакана
     ++totalEventsRouted_;
 
     // Печатать промежуточный snapshot если:
@@ -27,7 +30,7 @@ void LobRouter::route(const MarketDataEvent& event) {
                   << " ts=" << event.tsEvent << "]\n";
         std::cout << "Instrument: " << event.symbol
                   << " (id=" << event.instrumentId << ")\n";
-        lob.printSnapshot(std::cout, 5);
+        lob->printSnapshot(std::cout, 5);
     }
 }
 
@@ -38,8 +41,8 @@ void LobRouter::printFinalState(std::ostream& os) const
 
     for (const auto& [instrumentId, lob] : lobs_)
     {
-        auto bid = lob.bestBid();
-        auto ask = lob.bestAsk();
+        auto bid = lob->bestBid();
+        auto ask = lob->bestAsk();
 
         os << "instrument_id=" << instrumentId;
 
@@ -48,9 +51,9 @@ void LobRouter::printFinalState(std::ostream& os) const
             os << " symbol=\"" << symIt->second << "\"";
 
         os << " best_bid=" << (bid ? std::to_string(*bid) : "null")
-            << " best_bid_size=" << lob.bestBidSize()
+            << " best_bid_size=" << lob->bestBidSize()
             << " best_ask=" << (ask ? std::to_string(*ask) : "null")
-            << " best_ask_size=" << lob.bestAskSize()
+            << " best_ask_size=" << lob->bestAskSize()
             << "\n";
     }
 }
