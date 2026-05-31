@@ -23,6 +23,7 @@ target_link_libraries(${TARGET} PRIVATE
     Catch2-static-lib
     Threads::Threads
     back-tester-ingestion
+    back-tester-market-data-feed
     back-tester-order-book
 )
 
