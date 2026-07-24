@@ -9,10 +9,10 @@ Team Lead updates this file after every handoff, QA run, review, merge, or archi
 | Upstream branch | `main` |
 | HW4 integration branch | `hw4/backtest-engine-options` |
 | Reviewed starting commit | `c4f4c02916f5a9fb5f2636926fd93cd28af0f46d` |
-| Current integration commit | `1a097e56605836ee60a7343c73aaef647d48dc01` |
-| Current milestone | M4B |
-| Build status | M4A merged; clean Release build and CTest 6/6 passed; native suite 57/57 |
-| Python package status | Editable reinstall/import passed; native/Python version reports `0.0.1` |
+| Current integration commit | `9c7967a0210e10009c39d1d50951efe8d4ec81da` |
+| Current milestone | M5 |
+| Build status | M4B merged; Release CTest 6/6, ASan/UBSan 6/6, TSan 1/1 |
+| Python package status | Real runtime path merged; Python suite 18/18; native/Python version `0.0.1` |
 
 ## Milestone status
 
@@ -25,8 +25,8 @@ Team Lead updates this file after every handoff, QA run, review, merge, or archi
 | M2C Python stub | Team Lead disposition | superseded | — | — | — | — | Real M3 engine exists; bind directly in M4B instead of building throwaway stub |
 | M3 Trading/matching | Trading developer | `2fa28d04` from `cb74071` | ✅ | ✅ | ✅ | ✅ | Re-QA PASS; re-review APPROVE; no P0/P1/P2 |
 | M4A Results/PnL | Results developer | `1a097e56` from `0984521` | ✅ | ✅ | ✅ | ✅ | Performance P1 fixed; re-QA PASS; re-review APPROVE |
-| M4B Python integration | Python/runtime developer | `tasks/M4B_python_runtime.md` from `1a097e56` | 🟡 | ⬜ | ⬜ | ⬜ | Real engine path; no stub |
-| M5 End-to-end | _assign_ | | ⬜ | ⬜ | ⬜ | ⬜ | |
+| M4B Python integration | Python/runtime developer | `9c7967a0` | ✅ | ✅ | ✅ | ✅ | Two P1 review findings fixed; final QA/review PASS; no P0/P1/P2 |
+| M5 End-to-end | Integration developer | `tasks/M5_end_to_end.md` from `9c7967a0` | 🟡 | ⬜ | ⬜ | ⬜ | Two-instrument deterministic checkpoint |
 | M6 Benchmarks/hardening | _assign_ | | ⬜ | ⬜ | ⬜ | ⬜ | |
 
 Legend: ⬜ not started · 🟡 active · ✅ passed · ❌ failed · ⏸ blocked.
@@ -35,17 +35,17 @@ Legend: ⬜ not started · 🟡 active · ✅ passed · ❌ failed · ⏸ blocke
 
 | Task ID | Scope | Agent | Base | Owned files | Dependencies | State | Blocker |
 |---|---|---|---|---|---|---|---|
-| M4B-001 | Real Python Strategy API, runner, and result hand-off | Python/runtime developer | `1a097e56` | `src/python`, `src/runtime`, Python package/tests, minimal build docs | M3 + M4A merged | Active | None |
+| M5-001 | Deterministic two-instrument Python checkpoint | Integration developer | `9c7967a0` | examples, tiny fixture, E2E tests, README | M4B merged | Active | None |
 
 ## Open findings
 
 | Finding | Severity | Source | Owner | Target task | State |
 |---|---|---|---|---|---|
-| M0-QA-001 | P2 | QA + Review | M1/follow-up owner | Version identity | Open |
-| M2A-REV-003 | P2 | Review | M3 owner | Validate positive `contract_multiplier` before accounting | Open |
-| M2B-REV-001 | P2 | Review | M3 owner | Enforce unique monotonic producer command sequences | Open |
+| M0-QA-001 | P2 | QA + Review | M4B owner | Version identity | Closed in M4B (`0.0.1`) |
+| M2A-REV-003 | P2 | Review | M3 owner | Validate positive `contract_multiplier` before accounting | Closed in M3 |
+| M2B-REV-001 | P2 | Review | M3 owner | Enforce unique monotonic producer command sequences | Closed in M3 |
 | M2B-REV-002 | P2 | Review | Later runtime hardening | Document or linearize general SPSC `close()` versus in-flight push | Deferred |
-| M3-M4-NOTE | P2 | Review | M4B owner | Python optional config must select a positive order-latency default | Open |
+| M3-M4-NOTE | P2 | Review | M4B owner | Python optional config must select a positive order-latency default | Closed in M4B |
 
 ## Recent decisions
 
@@ -72,3 +72,4 @@ Legend: ⬜ not started · 🟡 active · ✅ passed · ❌ failed · ⏸ blocke
 | M2B-001 | `01f7d324`; native 37/37, Release CTest 6/6, ASan/UBSan + TSan PASS | PASS after DateRange P1 fix; full adversarial matrix | APPROVE WITH P2; no P0/P1 | Fast-forwarded |
 | M3-001 | `2fa28d04`; native 49/49, Release CTest 6/6, ASan/UBSan + TSan PASS | PASS after checked-accounting/latency fixes; full external harness | APPROVE; no P0/P1/P2 | Fast-forwarded |
 | M4A-001 | `1a097e56`; native 57/57, Release CTest 6/6, ASan/UBSan PASS | PASS; exact/lifetime/performance external harnesses | APPROVE after O(N²) ledger-copy fix; no P0/P1 | Fast-forwarded |
+| M4B-001 | `9c7967a0`; Release CTest 6/6, Python 18/18, ASan/UBSan + TSan PASS | PASS; causality, callback recursion, GIL/context and reuse adversarial coverage | APPROVE; no P0/P1/P2 | Fast-forwarded |
