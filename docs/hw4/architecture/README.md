@@ -40,7 +40,8 @@ trading thread is reacting to the current delivery.
 2. [`02_context_and_containers.md`](02_context_and_containers.md) — runtime
    topology, ownership, and complete market/order flows.
 3. [`03_components_and_boundaries.md`](03_components_and_boundaries.md) —
-   source tree, module responsibilities, target graph, and dependencies.
+   canonical component interaction diagram, source tree, module
+   responsibilities, target graph, and dependencies.
 4. [`04_event_time_and_concurrency.md`](04_event_time_and_concurrency.md) —
    virtual time, stable ordering, queues, ready barrier, and shutdown.
 5. [`05_order_matching_and_state.md`](05_order_matching_and_state.md) —

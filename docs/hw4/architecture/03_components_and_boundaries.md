@@ -32,6 +32,78 @@ The build currently compiles native implementation files into the static
 library `back-tester-lib`. Folder boundaries still define ownership even though
 they are not separate libraries.
 
+## Runtime component interaction
+
+```mermaid
+flowchart TB
+    DATA[("MBO JSONL")]
+
+    subgraph PYTHON["Python boundary"]
+        direction LR
+        API["backtest.run()"]
+        ADAPTER["Strategy adapter<br/>and active context"]
+        STRATEGY["Python Strategy"]
+        PYRESULT["Result views<br/>pandas / NumPy"]
+
+        ADAPTER <-->|"callbacks / commands"| STRATEGY
+    end
+
+    RUN["run_backtest()<br/>construct, run, join, freeze"]
+
+    subgraph DISPATCHER["Dispatcher thread"]
+        direction LR
+        READER["JsonlReader<br/>parse once"]
+        SOURCE["Scheduled source<br/>atomic groups"]
+        BOOKS[("HistoricalLOBStore<br/>single writer")]
+        SCHED["Scheduler<br/>stable timeline"]
+        EVENTQ[["Event ring"]]
+
+        READER --> SOURCE
+        SOURCE -- "write group" --> BOOKS
+        SOURCE -- "market event" --> SCHED
+        SCHED --> EVENTQ
+    end
+
+    subgraph CONSUMER["Trading thread"]
+        direction LR
+        ENGINE["TradingEngine<br/>lifecycle and callbacks"]
+        SIM["SimulatedLOB / EngineView<br/>sole fill authority"]
+        POSITION["PositionKeeper"]
+        RECORDER["ResultRecorder"]
+
+        ENGINE <-->|"matching / fills"| SIM
+        ENGINE --> POSITION
+        ENGINE --> RECORDER
+    end
+
+    COMMANDQ[["Command ring"]]
+    READY[("processed_seq<br/>ready barrier")]
+
+    DATA --> READER
+    API -- "GIL released" --> RUN
+    RUN -. "constructs and joins" .-> SCHED
+    RUN -. "constructs and joins" .-> ENGINE
+    EVENTQ --> ENGINE
+    ENGINE -- "delayed commands" --> COMMANDQ --> SCHED
+    ENGINE -- "acknowledge" --> READY
+    READY -. "next dispatch" .-> SCHED
+    BOOKS -. "guarded read" .-> SIM
+    ENGINE <--> ADAPTER
+    RECORDER -- "freeze after join" --> PYRESULT
+```
+
+The diagram is arranged as three layers: Python boundary, dispatcher thread,
+and trading thread. Solid arrows show runtime data or control flow; dotted
+arrows show lifetime, synchronization, or guarded read relationships. The
+dispatcher is the only writer of `HistoricalLOBStore`. The trading thread is
+the only writer of private order state, positions, and mutable result columns.
+The ready barrier keeps the guarded historical-book read stable through
+matching, state updates, callbacks, and command publication.
+
+The sequence diagrams in
+[`02_context_and_containers.md`](02_context_and_containers.md) define the exact
+ordering within the market-delivery and order/cancel paths.
+
 ## Implemented source layout
 
 ```text
