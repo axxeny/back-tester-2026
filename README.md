@@ -72,15 +72,35 @@ an independent cancelled order, callback ordering, positions, and PnL.
 
 ## Native build and tests
 
-Configure a clean Release build with tests enabled:
+From a clean checkout, install the editable extension, verify the import, and
+run the complete Release and Python suites:
 
 ```bash
-uv run cmake -S . -B build-m0 -DCMAKE_BUILD_TYPE=Release -DBUILD_TESTS=ON
-uv run cmake --build build-m0 -j
-uv run ctest --test-dir build-m0 --output-on-failure
+uv sync --locked
+uv run pip install -e .
+uv run python -c "import back_tester; print(back_tester.__file__); print(back_tester.version())"
+uv run cmake -S . -B build-release -G Ninja -DCMAKE_BUILD_TYPE=Release -DBUILD_TESTS=ON
+uv run cmake --build build-release -j
+uv run ctest --test-dir build-release --output-on-failure
 uv run pytest -q python/tests
+uv run python examples/mean_reversion.py
+```
+
+Run the two required benchmarks only from that Release setup:
+
+```bash
+build-release/bin/test/back-tester-scheduler-benchmark
 uv run python python/benchmarks/callback_overhead.py
 ```
+
+The scheduler benchmark reports warmed dispatcher-to-consumer round trips,
+including ring capacity, waiting strategy, build/compiler/platform metadata,
+and min/mean/p50/p95/p99. The Python benchmark reports 20 warmed samples of
+exactly 1,000 no-op callbacks for top-1 and top-15 payloads. A synthetic empty
+native loop is not reported because the Release compiler elides it; callback
+totals remain unadjusted. Parsing, process startup, logging, and DataFrame
+construction are outside the timed region. Results are machine-specific
+observations, not universal pass thresholds.
 
 The test executable uses a small checked-in test runner. Native test
 configuration does not download dependencies and does not require anything in
@@ -92,16 +112,29 @@ The CLI requires exactly one data path. With no path it prints usage and exits
 with status 64:
 
 ```bash
-build-m0/bin/back-tester
+build-release/bin/back-tester
 ```
 
 Run ingestion against the deterministic checked-in fixture:
 
 ```bash
-build-m0/bin/back-tester test/data/tiny_mbo.jsonl
+build-release/bin/back-tester test/data/tiny_mbo.jsonl
 ```
 
 A missing or unreadable path exits with status 2.
+
+## Model limitations
+
+- Synthetic fills optimistically consume displayed historical liquidity at or
+  through the limit. Historical queue position, market impact, probabilistic
+  passive fills, slippage, and source-book mutation are not modeled.
+- The mandatory runtime uses one process, one dispatcher, and one EngineView
+  with deterministic fixed latency. Multi-engine simulation is only an
+  extension point.
+- Only limit GTC submission and cancel are supported. Replace, IOC/FOK,
+  post-only, stops, pegs, and multi-leg orders are out of scope.
+- Input support is Databento-like MBO JSONL. Options exercise, assignment,
+  expiry settlement, Greeks, and a full risk engine are not implemented.
 
 ## Development checks
 

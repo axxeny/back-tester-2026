@@ -26,9 +26,9 @@ is ambiguous.
 | Zero-copy NumPy/Arrow hand-off | Native-to-array views are zero-copy where dtype and ownership permit; any unavoidable pandas materialization copy must be bulk, explicit, and lifetime-tested, never per-row | M4A, M4B | buffer-address/ownership tests plus code review |
 | `backtest.run(strategy, data_path, date_range)` | Minimal three-argument form with optional explicit `BacktestConfig` | M4B | Python end-to-end invocation test |
 | Synthetic matching harness | Focused native matching suite | M3 | cases in `architecture/09_testing_and_acceptance.md` |
-| End-to-end Python strategy | Checked-in deterministic fixture and example strategy through the real engine path | M5 | exact callback/order/fill/position/result assertions |
-| Ready round-trip benchmark | Warmed Release dispatcher → consumer → `processed_seq` measurement | M6 | reproducible command and p50/p95/p99/min/mean report |
-| 1,000-callback benchmark | Top-1 and top-15 no-op Python callback samples, with native overhead separated where possible | M6 | reproducible command and benchmark report |
+| End-to-end Python strategy | Checked-in deterministic fixture and example strategy through the real engine path | M5 | `python/tests/test_end_to_end.py`; `uv run python examples/mean_reversion.py`; exact callback/order/fill/position/result assertions and normalized 20-run comparison |
+| Ready round-trip benchmark | Warmed Release dispatcher → consumer → `processed_seq` measurement | M6 | `build-release/bin/test/back-tester-scheduler-benchmark`; reports Release/compiler/OS/CPU, capacity/waiting, warm-up/measured counts, and p50/p95/p99/min/mean |
+| 1,000-callback benchmark | Top-1 and top-15 no-op Python callback samples, with native overhead separated where possible | M6 | `uv run python python/benchmarks/callback_overhead.py`; exactly 1,000 callbacks/sample with a prebuilt payload; totals are unadjusted because a side-effect-free Release native loop is compiler-elided |
 | N concurrent EngineViews bonus | Compatible extension point, not required for the mandatory one-engine scheduler | Post-M6 / bonus | independent-view isolation tests if retained |
 
 ## Original diagram disposition
@@ -69,3 +69,13 @@ copies:
 
 Any resolution that changes the frozen decisions must update the decision log
 before dependent implementation starts.
+
+## Final submission evidence
+
+The exact clean install, Release build/CTest, full Python suite, example, and
+both benchmark commands are maintained in the repository `README.md`. Final
+hardening also runs the 20-run determinism case in
+`python/tests/test_end_to_end.py` and sanitizer builds where the host compiler
+supports them. Benchmark numbers are observations for same-machine regression
+comparison; the project intentionally defines no machine-independent latency
+threshold.
