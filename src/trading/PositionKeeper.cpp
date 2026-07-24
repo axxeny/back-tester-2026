@@ -5,6 +5,33 @@
 #include <stdexcept>
 
 namespace cmf::trading {
+namespace {
+
+[[nodiscard]] bool valid_side(Side side) noexcept {
+  return side == Side::Buy || side == Side::Sell;
+}
+
+[[nodiscard]] __int128 checked_multiply(__int128 left, __int128 right) {
+  __int128 result{};
+  if (__builtin_mul_overflow(left, right, &result)) {
+    throw PositionError("realized PnL multiplication overflow");
+  }
+  return result;
+}
+
+[[nodiscard]] std::int64_t checked_accumulate(std::int64_t current,
+                                              __int128 delta) {
+  __int128 accumulated{};
+  if (__builtin_add_overflow(static_cast<__int128>(current), delta,
+                             &accumulated) ||
+      accumulated < std::numeric_limits<std::int64_t>::min() ||
+      accumulated > std::numeric_limits<std::int64_t>::max()) {
+    throw PositionError("realized PnL numerator overflow");
+  }
+  return static_cast<std::int64_t>(accumulated);
+}
+
+} // namespace
 
 void PositionKeeper::register_instrument(const InstrumentMeta &meta) {
   if (meta.instrument_id <= 0 || meta.tick_size_ticks <= 0 ||
@@ -25,30 +52,43 @@ void PositionKeeper::apply_fill(InstrumentId instrument_id, Side side,
   if (iterator == positions_.end()) {
     throw std::invalid_argument("fill references unknown instrument");
   }
-  if (side == Side::None || price <= 0 || quantity <= 0) {
+  if (!valid_side(side) || price <= 0 || quantity <= 0) {
     throw std::invalid_argument("invalid fill");
   }
 
   auto &position = iterator->second;
+  Quantity validation_remaining = quantity;
+  std::int64_t validated_realized = position.realized_numerator;
+  for (const auto &lot : position.lots) {
+    if (validation_remaining == 0 || lot.side == side) {
+      break;
+    }
+    const Quantity closing = std::min(validation_remaining, lot.quantity);
+    const __int128 delta =
+        lot.side == Side::Buy
+            ? static_cast<__int128>(price) - static_cast<__int128>(lot.price)
+            : static_cast<__int128>(lot.price) - static_cast<__int128>(price);
+    const __int128 price_quantity =
+        checked_multiply(delta, static_cast<__int128>(closing));
+    const __int128 realized = checked_multiply(
+        price_quantity,
+        static_cast<__int128>(position.meta.contract_multiplier));
+    validated_realized = checked_accumulate(validated_realized, realized);
+    validation_remaining -= closing;
+  }
+
+  const Quantity signed_fill = side == Side::Buy ? quantity : -quantity;
+  Quantity validated_net{};
+  if (__builtin_add_overflow(position.net_quantity, signed_fill,
+                             &validated_net)) {
+    throw PositionError("position quantity overflow");
+  }
+
   Quantity remaining = quantity;
   while (remaining > 0 && !position.lots.empty() &&
          position.lots.front().side != side) {
     auto &lot = position.lots.front();
     const Quantity closing = std::min(remaining, lot.quantity);
-    const __int128 delta =
-        lot.side == Side::Buy
-            ? static_cast<__int128>(price) - static_cast<__int128>(lot.price)
-            : static_cast<__int128>(lot.price) - static_cast<__int128>(price);
-    const __int128 realized =
-        delta * static_cast<__int128>(closing) *
-        static_cast<__int128>(position.meta.contract_multiplier);
-    const __int128 accumulated =
-        static_cast<__int128>(position.realized_numerator) + realized;
-    if (accumulated < std::numeric_limits<std::int64_t>::min() ||
-        accumulated > std::numeric_limits<std::int64_t>::max()) {
-      throw std::overflow_error("realized PnL numerator overflow");
-    }
-    position.realized_numerator = static_cast<std::int64_t>(accumulated);
     lot.quantity -= closing;
     remaining -= closing;
     if (lot.quantity == 0) {
@@ -58,17 +98,8 @@ void PositionKeeper::apply_fill(InstrumentId instrument_id, Side side,
   if (remaining > 0) {
     position.lots.push_back(Position::Lot{side, price, remaining});
   }
-
-  const __int128 signed_fill = side == Side::Buy
-                                   ? static_cast<__int128>(quantity)
-                                   : -static_cast<__int128>(quantity);
-  const __int128 updated =
-      static_cast<__int128>(position.net_quantity) + signed_fill;
-  if (updated < std::numeric_limits<Quantity>::min() ||
-      updated > std::numeric_limits<Quantity>::max()) {
-    throw std::overflow_error("position quantity overflow");
-  }
-  position.net_quantity = static_cast<Quantity>(updated);
+  position.realized_numerator = validated_realized;
+  position.net_quantity = validated_net;
 }
 
 PositionSnapshot PositionKeeper::position(InstrumentId instrument_id) const {

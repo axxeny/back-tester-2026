@@ -23,6 +23,7 @@ Use this file to prevent different agents from silently implementing incompatibl
 | ADR-015 | Accepted | Result enum columns use each enum's explicit fixed-width underlying encoding documented in `architecture/10_shared_contracts.md`. | Stabilizes the native/Python schema boundary. | core enums, result conversion |
 | ADR-016 | Accepted implementation boundary | M1 freezes result row values only; native buffer ownership and zero-copy lifetime are implemented and tested in M4. | Avoids an unverified ownership claim before result buffers exist. | results, Python boundary |
 | ADR-017 | Accepted project default | Instrument prices use a positive integer `price_scale` in ticks per quoted/account currency unit; native PnL remains an unrounded checked rational until one binary64 query/result conversion. Midpoints retain half-tick precision. | Makes tick-to-money conversion and rounding deterministic across runtime and result work. | instrument metadata, PositionKeeper, results |
+| ADR-018 | Accepted | Fixed order latency must be strictly positive; market-data latency may be zero but must not be negative. | The assignment requires a realistic non-instant order round trip, and zero-latency callback submissions can otherwise execute at the callback timestamp. | BacktestConfig runtime validation, trading tests |
 
 ## Open or instructor-dependent decisions
 

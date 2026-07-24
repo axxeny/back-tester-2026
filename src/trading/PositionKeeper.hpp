@@ -4,9 +4,15 @@
 #include "core/Events.hpp"
 
 #include <deque>
+#include <stdexcept>
 #include <unordered_map>
 
 namespace cmf::trading {
+
+class PositionError : public std::runtime_error {
+public:
+  using std::runtime_error::runtime_error;
+};
 
 class PositionKeeper {
 public:

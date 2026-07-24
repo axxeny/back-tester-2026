@@ -13,6 +13,10 @@ namespace {
          state == OrderState::Rejected;
 }
 
+[[nodiscard]] bool valid_side(Side side) noexcept {
+  return side == Side::Buy || side == Side::Sell;
+}
+
 [[nodiscard]] std::size_t mix(std::size_t seed, std::size_t value) noexcept {
   return seed ^ (value + 0x9e3779b97f4a7c15ULL + (seed << 6U) + (seed >> 2U));
 }
@@ -45,12 +49,13 @@ TradingEngine::TradingEngine(std::span<const InstrumentMeta> instruments,
                              const market::HistoricalLOBStore &books,
                              Strategy &strategy, Recorder &recorder)
     : config_(config), books_(books), strategy_(strategy), recorder_(recorder) {
-  if (config_.market_data_latency_ns < 0 || config_.order_latency_ns < 0 ||
+  if (config_.market_data_latency_ns < 0 || config_.order_latency_ns <= 0 ||
       config_.book_depth == 0) {
     throw std::invalid_argument("invalid backtest configuration");
   }
   instruments_.reserve(instruments.size());
   resting_.reserve(instruments.size());
+  open_order_ids_.reserve(instruments.size());
   for (const auto &meta : instruments) {
     positions_.register_instrument(meta);
     const auto [iterator, inserted] =
@@ -60,6 +65,7 @@ TradingEngine::TradingEngine(std::span<const InstrumentMeta> instruments,
       throw std::invalid_argument("duplicate instrument metadata");
     }
     resting_.try_emplace(meta.instrument_id);
+    open_order_ids_.try_emplace(meta.instrument_id);
   }
   query_buffer_.reserve(32);
 }
@@ -100,7 +106,7 @@ RejectReason TradingEngine::validate_order(InstrumentId instrument_id,
   if (meta == nullptr) {
     return RejectReason::UnknownInstrument;
   }
-  if (side == Side::None) {
+  if (!valid_side(side)) {
     return RejectReason::InvalidSide;
   }
   if (quantity <= 0) {
@@ -141,6 +147,7 @@ ClOrdId TradingEngine::submit_limit(InstrumentId instrument_id, Side side,
     reject_new(iterator->second, reason);
     return client_order_id;
   }
+  open_order_ids_.at(instrument_id).insert(client_order_id);
 
   const Sequence command_sequence = next_command_sequence();
   const NewOrderCommand command{client_order_id,   instrument_id,   side,
@@ -194,17 +201,18 @@ PositionSnapshot TradingEngine::position(InstrumentId instrument_id) const {
 std::span<const OrderQueryRow>
 TradingEngine::open_orders(InstrumentId instrument_id) {
   query_buffer_.clear();
-  for (const auto &[client_order_id, order] : orders_) {
-    (void)client_order_id;
-    if (order.query.instrument_id == instrument_id &&
-        !is_terminal(order.query.state) && order.query.remaining_quantity > 0) {
-      query_buffer_.push_back(order.query);
-    }
+  const auto indexed = open_order_ids_.find(instrument_id);
+  if (indexed == open_order_ids_.end()) {
+    return query_buffer_;
   }
-  std::sort(query_buffer_.begin(), query_buffer_.end(),
-            [](const auto &left, const auto &right) {
-              return left.client_order_id < right.client_order_id;
-            });
+  for (const ClOrdId client_order_id : indexed->second) {
+    const auto order = orders_.find(client_order_id);
+    if (order == orders_.end() || is_terminal(order->second.query.state) ||
+        order->second.query.remaining_quantity <= 0) {
+      throw TradingError("open-order index is inconsistent");
+    }
+    query_buffer_.push_back(order->second.query);
+  }
   return query_buffer_;
 }
 
@@ -302,6 +310,8 @@ void TradingEngine::process_cancel(const CancelCommand &command) {
   erase_resting(order);
   order.query.state = OrderState::Cancelled;
   order.cancel_requested = false;
+  open_order_ids_.at(order.query.instrument_id)
+      .erase(order.query.client_order_id);
   emit_order_event(order, OrderLogEventType::Cancelled);
 }
 
@@ -377,6 +387,10 @@ void TradingEngine::apply_fill(OwnOrder &order, PriceTicks price,
                           : OrderState::PartiallyFilled;
   positions_.apply_fill(order.query.instrument_id, order.query.side, price,
                         quantity);
+  if (order.query.remaining_quantity == 0) {
+    open_order_ids_.at(order.query.instrument_id)
+        .erase(order.query.client_order_id);
+  }
   emit_order_event(order, OrderLogEventType::Fill);
 
   if (next_fill_sequence_ == std::numeric_limits<Sequence>::max()) {
@@ -464,6 +478,10 @@ void TradingEngine::emit_reject(InstrumentId instrument_id,
 
 void TradingEngine::reject_new(OwnOrder &order, RejectReason reason) {
   order.query.state = OrderState::Rejected;
+  const auto indexed = open_order_ids_.find(order.query.instrument_id);
+  if (indexed != open_order_ids_.end()) {
+    indexed->second.erase(order.query.client_order_id);
+  }
   emit_order_event(order, OrderLogEventType::Reject, reason);
   emit_reject(order.query.instrument_id, order.query.client_order_id, reason,
               now_ns_);

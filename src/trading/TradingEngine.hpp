@@ -7,6 +7,7 @@
 #include "trading/Strategy.hpp"
 
 #include <map>
+#include <set>
 #include <span>
 #include <stdexcept>
 #include <unordered_map>
@@ -112,6 +113,7 @@ private:
   std::unordered_map<InstrumentId, InstrumentMeta> instruments_;
   std::unordered_map<ClOrdId, OwnOrder> orders_;
   std::unordered_map<InstrumentId, InstrumentOrders> resting_;
+  std::unordered_map<InstrumentId, std::set<ClOrdId>> open_order_ids_;
   std::unordered_map<ConsumptionKey, Quantity, ConsumptionHash> consumption_;
   std::vector<OrderQueryRow> query_buffer_;
   scheduler::CommandSink *active_commands_{};

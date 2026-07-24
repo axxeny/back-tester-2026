@@ -16,6 +16,10 @@ new order arrival scheduled_ts   = submit_engine_ts + order_latency
 cancel arrival scheduled_ts      = cancel_submit_engine_ts + order_latency
 ```
 
+`order_latency` is strictly positive so a callback submission cannot execute
+recursively at its submission timestamp. `market_data_latency` may be zero, but
+neither configured latency may be negative.
+
 The Trading Engine's virtual clock is set to the consumed event's `scheduled_ts_ns`. It must never move backwards. A source ordering regression is an input error, not something to hide with wall-clock time.
 
 ## 2. Scheduled event ordering

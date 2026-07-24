@@ -5,6 +5,7 @@
 #include "MiniTest.hpp"
 
 #include <array>
+#include <limits>
 #include <stdexcept>
 #include <vector>
 
@@ -83,12 +84,31 @@ TEST_CASE("Trading engine validates instrument metadata", "[Trading]") {
   bool rejected = false;
   try {
     const std::array invalid{InstrumentMeta{1, 0, 100, 1}};
-    TradingEngine engine(invalid, BacktestConfig{}, books, strategy, recorder);
+    TradingEngine engine(invalid, BacktestConfig{0, 1, 1}, books, strategy,
+                         recorder);
     (void)engine;
   } catch (const std::invalid_argument &) {
     rejected = true;
   }
   REQUIRE(rejected);
+}
+
+TEST_CASE("Trading engine requires causal positive order latency",
+          "[Trading]") {
+  HistoricalLOBStore books;
+  RecordingStrategy strategy;
+  RecordingRecorder recorder;
+  for (const TimestampNs invalid_latency : {TimestampNs{0}, TimestampNs{-1}}) {
+    bool rejected = false;
+    try {
+      TradingEngine engine(instruments, BacktestConfig{0, invalid_latency, 1},
+                           books, strategy, recorder);
+      (void)engine;
+    } catch (const std::invalid_argument &) {
+      rejected = true;
+    }
+    REQUIRE(rejected);
+  }
 }
 
 TEST_CASE("Real runtime delays order and sweeps multiple historical orders",
@@ -153,7 +173,7 @@ TEST_CASE("Resting order fills later and private consumption tracks identity",
     }
   } strategy(books);
   RecordingRecorder recorder;
-  TradingEngine engine(instruments, BacktestConfig{0, 0, 1}, books, strategy,
+  TradingEngine engine(instruments, BacktestConfig{0, 1, 1}, books, strategy,
                        recorder);
   const auto view100 = empty_book_view(100, 10);
   const auto view200 = empty_book_view(200, 20);
@@ -198,9 +218,9 @@ TEST_CASE("Own orders use price-time priority and EngineViews stay isolated",
   } first, second;
   RecordingRecorder first_recorder;
   RecordingRecorder second_recorder;
-  TradingEngine first_engine(instruments, BacktestConfig{0, 0, 1}, books, first,
+  TradingEngine first_engine(instruments, BacktestConfig{0, 1, 1}, books, first,
                              first_recorder);
-  TradingEngine second_engine(instruments, BacktestConfig{0, 0, 1}, books,
+  TradingEngine second_engine(instruments, BacktestConfig{0, 1, 1}, books,
                               second, second_recorder);
   const auto view = empty_book_view(100, 2);
   const std::array events{
@@ -226,7 +246,9 @@ TEST_CASE("Cancel is delayed and equal-time market fill wins", "[Trading]") {
   struct CancelStrategy final : RecordingStrategy {
     HistoricalLOBStore &books;
     ClOrdId id{};
+    ClOrdId replacement_id{};
     int callbacks{};
+    std::size_t fills_seen_in_reject{};
 
     explicit CancelStrategy(HistoricalLOBStore &store) : books(store) {}
 
@@ -240,6 +262,15 @@ TEST_CASE("Cancel is delayed and equal-time market fill wins", "[Trading]") {
         books.apply(
             market_event(2, 111, 70, MarketAction::Modify, Side::Sell, 100, 2));
       }
+    }
+
+    void on_reject(const RejectView &reject,
+                   StrategyContext &context) override {
+      RecordingStrategy::on_reject(reject, context);
+      fills_seen_in_reject = fills.size();
+      books.apply(
+          market_event(3, 121, 71, MarketAction::Add, Side::Sell, 100, 1));
+      replacement_id = context.submit_limit(1, Side::Buy, 100, 1);
     }
   } strategy(books);
   RecordingRecorder recorder;
@@ -255,9 +286,13 @@ TEST_CASE("Cancel is delayed and equal-time market fill wins", "[Trading]") {
   SchedulerRuntime runtime(SchedulerRuntimeConfig{DateRange{}, 1, 8, 16});
   runtime.run(events, engine);
 
-  REQUIRE(strategy.fills.size() == 1);
+  REQUIRE(strategy.fills.size() == 2);
   REQUIRE(strategy.fills[0].engine_ts_ns == 121);
   REQUIRE(strategy.fills[0].remaining_quantity == 0);
+  REQUIRE(strategy.fills_seen_in_reject == 1);
+  REQUIRE(strategy.replacement_id == 2);
+  REQUIRE(strategy.fills[1].client_order_id == strategy.replacement_id);
+  REQUIRE(strategy.fills[1].engine_ts_ns == 131);
   REQUIRE(strategy.rejects.size() == 1);
   REQUIRE(strategy.rejects[0].reason == RejectReason::AlreadyTerminal);
 }
@@ -273,6 +308,7 @@ TEST_CASE("Invalid orders and unknown cancels reject deterministically",
         done = true;
         (void)context.submit_limit(2, Side::Buy, 100, 1);
         (void)context.submit_limit(1, Side::None, 100, 1);
+        (void)context.submit_limit(1, static_cast<Side>(2), 100, 1);
         (void)context.submit_limit(1, Side::Buy, 101, 1);
         (void)context.submit_limit(1, Side::Buy, 100, 0);
         REQUIRE_FALSE(context.cancel_order(999));
@@ -281,19 +317,21 @@ TEST_CASE("Invalid orders and unknown cancels reject deterministically",
   } strategy;
   RecordingRecorder recorder;
   const std::array ticked{InstrumentMeta{1, 2, 100, 1}};
-  TradingEngine engine(ticked, BacktestConfig{}, books, strategy, recorder);
+  TradingEngine engine(ticked, BacktestConfig{0, 1, 1}, books, strategy,
+                       recorder);
   const auto view = empty_book_view(100, 1);
   const std::array events{
       ScheduledEvent{MarketDelivery{1, 100, 100, 1, view, {}}}};
   SchedulerRuntime runtime(SchedulerRuntimeConfig{DateRange{}, 1, 8, 16});
   runtime.run(events, engine);
 
-  REQUIRE(strategy.rejects.size() == 5);
+  REQUIRE(strategy.rejects.size() == 6);
   REQUIRE(strategy.rejects[0].reason == RejectReason::UnknownInstrument);
   REQUIRE(strategy.rejects[1].reason == RejectReason::InvalidSide);
-  REQUIRE(strategy.rejects[2].reason == RejectReason::TickMisalignment);
-  REQUIRE(strategy.rejects[3].reason == RejectReason::NonPositiveQuantity);
-  REQUIRE(strategy.rejects[4].reason == RejectReason::UnknownOrder);
+  REQUIRE(strategy.rejects[2].reason == RejectReason::InvalidSide);
+  REQUIRE(strategy.rejects[3].reason == RejectReason::TickMisalignment);
+  REQUIRE(strategy.rejects[4].reason == RejectReason::NonPositiveQuantity);
+  REQUIRE(strategy.rejects[5].reason == RejectReason::UnknownOrder);
 }
 
 TEST_CASE("Sell sweep respects limit and leaves only protected remainder",
@@ -307,7 +345,7 @@ TEST_CASE("Sell sweep respects limit and leaves only protected remainder",
   strategy.price = 99;
   strategy.quantity = 8;
   RecordingRecorder recorder;
-  TradingEngine engine(instruments, BacktestConfig{}, books, strategy,
+  TradingEngine engine(instruments, BacktestConfig{0, 1, 1}, books, strategy,
                        recorder);
   const auto view = empty_book_view(100, 4);
   const std::array events{
@@ -338,15 +376,17 @@ TEST_CASE("Commands are globally monotonic and normal cancel is terminal",
       ++callbacks;
       if (callbacks == 1) {
         ids[0] = context.submit_limit(1, Side::Buy, 90, 1);
-        ids[1] = context.submit_limit(1, Side::Sell, 110, 1);
+        ids[1] = context.submit_limit(2, Side::Sell, 110, 1);
       } else if (callbacks == 2) {
         REQUIRE(context.cancel_order(ids[0]));
       }
     }
   } strategy;
   RecordingRecorder recorder;
-  TradingEngine engine(instruments, BacktestConfig{0, 5, 1}, books, strategy,
-                       recorder);
+  const std::array two_instruments{InstrumentMeta{1, 1, 100, 10},
+                                   InstrumentMeta{2, 1, 100, 10}};
+  TradingEngine engine(two_instruments, BacktestConfig{0, 5, 1}, books,
+                       strategy, recorder);
   const auto view100 = empty_book_view(100, 1);
   const auto view110 = empty_book_view(110, 2);
   const std::array events{
@@ -362,9 +402,10 @@ TEST_CASE("Commands are globally monotonic and normal cancel is terminal",
   });
 
   REQUIRE(command_sequences == std::vector<Sequence>({1, 2, 3}));
-  const auto open = engine.open_orders(1);
-  REQUIRE(open.size() == 1);
-  REQUIRE(open[0].client_order_id == strategy.ids[1]);
+  REQUIRE(engine.open_orders(1).empty());
+  const auto open_second = engine.open_orders(2);
+  REQUIRE(open_second.size() == 1);
+  REQUIRE(open_second[0].client_order_id == strategy.ids[1]);
   REQUIRE(recorder.orders.back().event_type == OrderLogEventType::Cancelled);
   REQUIRE(recorder.orders.back().state == OrderState::Cancelled);
 }
@@ -384,6 +425,36 @@ TEST_CASE("PositionKeeper uses exact multiplier-scaled FIFO realized inputs",
   REQUIRE(snapshot.net_quantity == -1);
   REQUIRE(snapshot.average_open_price_ticks == 90.0);
   REQUIRE(snapshot.realized_pnl == 0.0);
+}
+
+TEST_CASE("PositionKeeper overflow is defined and leaves state unchanged",
+          "[Trading]") {
+  PositionKeeper positions;
+  constexpr auto maximum = std::numeric_limits<std::int64_t>::max();
+  positions.register_instrument(InstrumentMeta{1, 1, 1, maximum});
+  positions.apply_fill(1, Side::Buy, 1, maximum);
+  const PositionSnapshot before = positions.position(1);
+
+  bool overflowed = false;
+  try {
+    positions.apply_fill(1, Side::Sell, maximum, maximum);
+  } catch (const PositionError &) {
+    overflowed = true;
+  }
+  REQUIRE(overflowed);
+  const PositionSnapshot after = positions.position(1);
+  REQUIRE(after.net_quantity == before.net_quantity);
+  REQUIRE(after.average_open_price_ticks == before.average_open_price_ticks);
+  REQUIRE(after.realized_pnl == before.realized_pnl);
+
+  bool invalid_side = false;
+  try {
+    positions.apply_fill(1, static_cast<Side>(2), 1, 1);
+  } catch (const std::invalid_argument &) {
+    invalid_side = true;
+  }
+  REQUIRE(invalid_side);
+  REQUIRE(positions.position(1).net_quantity == before.net_quantity);
 }
 
 TEST_CASE("Twenty scripted trading runs are deterministic", "[Trading]") {
