@@ -1,3 +1,4 @@
 add_subdirectory(common)
 add_subdirectory(main)
 add_subdirectory(market)
+add_subdirectory(scheduler)
