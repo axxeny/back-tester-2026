@@ -12,6 +12,11 @@ using ClOrdId = std::uint64_t;
 using ExchangeOrderId = std::uint64_t;
 using Sequence = std::uint64_t;
 
+struct AccountCurrencyAmount {
+  std::int64_t numerator{};
+  std::int64_t denominator{1};
+};
+
 enum class Side : std::int8_t {
   Sell = -1,
   None = 0,

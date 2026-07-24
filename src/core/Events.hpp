@@ -3,7 +3,10 @@
 #include "core/Types.hpp"
 
 #include <compare>
+#include <optional>
 #include <span>
+#include <type_traits>
+#include <variant>
 
 namespace cmf {
 
@@ -72,6 +75,15 @@ struct CancelCommand {
   Sequence command_sequence{};
 };
 
+struct MarketDelivery {
+  InstrumentId instrument_id{};
+  TimestampNs exchange_ts_ns{};
+  TimestampNs engine_ts_ns{};
+  Sequence source_sequence{};
+  std::optional<BookUpdateView> book_update;
+  std::span<const TradeView> trades;
+};
+
 struct ScheduledKey {
   TimestampNs scheduled_ts_ns{};
   EventPriority priority{EventPriority::MarketData};
@@ -80,11 +92,58 @@ struct ScheduledKey {
   auto operator<=>(const ScheduledKey &) const = default;
 };
 
-struct ScheduledEvent {
-  ScheduledKey key;
-  InstrumentId instrument_id{};
-  TimestampNs exchange_ts_ns{};
-  Sequence dispatch_sequence{};
+class ScheduledEvent {
+public:
+  using Payload = std::variant<MarketDelivery, NewOrderCommand, CancelCommand>;
+
+  explicit ScheduledEvent(MarketDelivery delivery,
+                          Sequence dispatch_sequence = 0)
+      : payload_(delivery), dispatch_sequence_(dispatch_sequence) {}
+
+  explicit ScheduledEvent(NewOrderCommand command,
+                          Sequence dispatch_sequence = 0)
+      : payload_(command), dispatch_sequence_(dispatch_sequence) {}
+
+  explicit ScheduledEvent(CancelCommand command, Sequence dispatch_sequence = 0)
+      : payload_(command), dispatch_sequence_(dispatch_sequence) {}
+
+  [[nodiscard]] EventPriority priority() const {
+    return std::visit(
+        []<typename PayloadType>(const PayloadType &) {
+          if constexpr (std::is_same_v<PayloadType, MarketDelivery>) {
+            return EventPriority::MarketData;
+          } else if constexpr (std::is_same_v<PayloadType, NewOrderCommand>) {
+            return EventPriority::NewOrder;
+          } else {
+            return EventPriority::Cancel;
+          }
+        },
+        payload_);
+  }
+
+  [[nodiscard]] ScheduledKey key() const {
+    return std::visit(
+        [this]<typename PayloadType>(const PayloadType &payload) {
+          if constexpr (std::is_same_v<PayloadType, MarketDelivery>) {
+            return ScheduledKey{payload.engine_ts_ns, priority(),
+                                payload.source_sequence};
+          } else {
+            return ScheduledKey{payload.scheduled_arrival_ts_ns, priority(),
+                                payload.command_sequence};
+          }
+        },
+        payload_);
+  }
+
+  [[nodiscard]] const Payload &payload() const noexcept { return payload_; }
+
+  [[nodiscard]] Sequence dispatch_sequence() const noexcept {
+    return dispatch_sequence_;
+  }
+
+private:
+  Payload payload_;
+  Sequence dispatch_sequence_{};
 };
 
 struct OrderQueryRow {

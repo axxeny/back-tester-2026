@@ -11,7 +11,40 @@ aliases old names to the core definitions and does not redeclare `Side`,
 Legacy LOB structures continue to store source prices as `double` until their
 owned migration tasks. New event-loop contracts use integer `PriceTicks`.
 
-## 2. Numeric and enum encodings
+## 2. Price and monetary units
+
+`PriceTicks` is an integer count in the instrument's quoted-price scale.
+`InstrumentMeta.price_scale` is the strictly positive number of price ticks per
+one quoted currency unit. `tick_size_ticks` is the strictly positive minimum
+price increment in that same integer scale. For example, with
+`price_scale=10'000` and `tick_size_ticks=5`, `PriceTicks{12'345}` represents
+1.2345 quoted currency units and valid prices are multiples of 5.
+
+`contract_multiplier` is a strictly positive integer number of quoted units per
+contract. HW4 assumes quoted currency and account currency are the same; FX
+conversion is out of scope. Native accounting preserves the exact rational:
+
+```text
+pnl_account_currency =
+    delta_price_ticks * signed_quantity * contract_multiplier / price_scale
+```
+
+The runtime must use checked integer arithmetic for the numerator and must not
+round intermediate values. A midpoint is the exact rational
+`(bid_ticks + ask_ticks) / 2`; consequently marked PnL has denominator
+`2 * price_scale` when the tick sum is odd. Overflow is an error, not wrapping.
+`AccountCurrencyAmount` is the minimal native rational value contract:
+`numerator / denominator`, with a strictly positive denominator. It does not
+implement unchecked arithmetic.
+
+`double` is permitted only in strategy-query snapshots and final PnL result
+values. Conversion happens once at that boundary, after rational evaluation,
+to the nearest IEEE-754 binary64 value using the default round-to-nearest,
+ties-to-even mode. Price, fill, order, and event-loop fields never use floating
+point. Positivity is a frozen contract; runtime validation belongs to the
+instrument/configuration task.
+
+## 3. Numeric and enum encodings
 
 Timestamps, price ticks, quantity, and instrument IDs are signed 64-bit
 integers. Client order IDs, exchange order IDs, and deterministic sequences are
@@ -32,7 +65,18 @@ All enum result columns store the enum's fixed-width underlying value:
 These encodings are public serialization/result contracts. Additions or changes
 require the decision-change process.
 
-## 3. Callback contract
+## 4. Scheduled payload and callback contract
+
+`ScheduledEvent` is a closed discriminated value over `MarketDelivery`,
+`NewOrderCommand`, and `CancelCommand`. It has no separately writable tag:
+priority and stable ordering key are derived from the active variant, so a
+market payload cannot carry new-order or cancel priority.
+
+`MarketDelivery` owns only scalar metadata. Its optional book view and trade
+span are non-owning views into dispatcher-owned stable event/book storage. That
+storage must remain valid and unchanged from enqueue until the Trading Engine
+publishes `processed_seq` for the delivery. New-order and cancel alternatives
+own complete command values; no side table is part of the contract.
 
 A book callback fires after the complete atomic historical group (for example,
 Databento `F_LAST`) and only when the configured top-N view changed. The
@@ -47,12 +91,13 @@ For one high-level market event, callback and state order is:
 5. enqueue commands created by callbacks;
 6. publish `processed_seq`.
 
-`BookUpdateView` contains non-owning spans. They are valid only for the duration
-of the callback and must be copied by a consumer that needs a longer lifetime.
-Other callback and command payloads are numeric value types with no owning
-strings or Python objects.
+`BookUpdateView` contains non-owning spans. They are valid through processing of
+their containing `MarketDelivery`, including the callback, and expire once its
+`processed_seq` acknowledgement is published. A consumer must copy data needed
+after that point. Other callback and command payloads are numeric value types
+with no owning strings or Python objects.
 
-## 4. Range and terminal policies
+## 5. Range and terminal policies
 
 `DateRange` includes historical source records whose exchange timestamp equals
 either the start or end. A command arrival at the end timestamp may execute; an
@@ -62,7 +107,7 @@ If a cancel arrives after its order has already reached terminal `Filled`
 state, it produces a reject with `RejectReason::AlreadyTerminal`. It is not a
 silent no-op.
 
-## 5. Results boundary
+## 6. Results boundary
 
 `FillResultRow`, `OrderLogResultRow`, and `PnlPoint` declare the native values
 and exact enum storage used by the result schemas. Buffer allocation,

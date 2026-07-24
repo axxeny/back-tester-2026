@@ -10,6 +10,7 @@ namespace cmf {
 struct InstrumentMeta {
   InstrumentId instrument_id{};
   PriceTicks tick_size_ticks{1};
+  PriceTicks price_scale{1};
   Quantity contract_multiplier{1};
 };
 
