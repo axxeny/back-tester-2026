@@ -10,6 +10,7 @@ add_executable(${TARGET}
     SchedulerTest.cpp
     SimulatedLOBTest.cpp
     TradingTest.cpp
+    ResultsTest.cpp
     TestMain.cpp
 )
 
