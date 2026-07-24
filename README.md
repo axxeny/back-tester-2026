@@ -59,6 +59,17 @@ DataFrames and the PnL Series are built in bulk from frozen typed native
 columns; callback-scoped book levels are copied into immutable Python-owned
 payloads.
 
+## Deterministic end-to-end example
+
+Run the checked-in two-instrument mean-reversion example after installation:
+
+```bash
+uv run python examples/mean_reversion.py
+```
+
+It exercises the real `backtest.run` path, including a delayed resting fill,
+an independent cancelled order, callback ordering, positions, and PnL.
+
 ## Native build and tests
 
 Configure a clean Release build with tests enabled:
