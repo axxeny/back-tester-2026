@@ -80,6 +80,11 @@ class SimulatedLOB {
 public:
   explicit SimulatedLOB(std::span<const InstrumentMeta> instruments);
 
+  // Returned spans alias this SimulatedLOB's internal fill buffer. Their
+  // elements remain valid only until the next accept() or on_market() call on
+  // this instance, or until this instance is moved from or destroyed,
+  // whichever comes first. cancel() does not invalidate them. Callers must
+  // consume the elements synchronously and must not retain the span.
   [[nodiscard]] std::span<const SyntheticFill>
   accept(ClOrdId client_order_id, InstrumentId instrument_id, Side side,
          PriceTicks limit_price, Quantity remaining_quantity,
