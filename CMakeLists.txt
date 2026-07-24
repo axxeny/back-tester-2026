@@ -7,12 +7,13 @@ set(CMAKE_MODULE_PATH ${CMAKE_MODULE_PATH} "${CMAKE_SOURCE_DIR}/cmake")
 include(cmake/GlobalSettings.cmake)
 include(cmake/GenerateVersionFile.cmake)
 
-if(BUILD_TESTS)
-    include(cmake/ThirdPartyLibs.cmake)
-endif()
-
 add_subdirectory(src)
 add_subdirectory(config)
+
+option(BUILD_PYTHON_MODULE "Build the Python extension module" OFF)
+if(BUILD_PYTHON_MODULE)
+    add_subdirectory(src/python)
+endif()
 
 if(BUILD_TESTS)
     enable_testing()

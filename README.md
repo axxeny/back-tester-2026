@@ -1,117 +1,70 @@
 # CMF Advanced Backtesting Engine for Options
 
-## Directory structure
+## Prerequisites
 
-```
-.
-├── 3rdparty                    # place holder for 3rd party libraries (downloaded during the build)
-├── build                       # local build tree used by CMake
-├    ├── bin                    # generated binaries
-├    ├── lib                    # generated libs (including those, which are built from 3rd party sources)
-├    ├── cfg                    # generated config files (if any)
-├    └── include                # generated include files (installed during the build for 3rd party sources)
-├── cmake                       # cmake helper scripts
-├── config                      # example config files
-├── scripts                     # shell (and other) maintenance scripts
-├── src                         # source files
-├    ├── common                 # common utility files
-├    ├── ...                    # ...
-├    └── main                   # main() for back-tester app
-├── test                        # unit-tests and other tests
-├── CMakeLists.txt              # main build script
-└── README.md                   # this README
-```
+- a C++20 compiler;
+- [UV](https://docs.astral.sh/uv/).
 
-## OS
+UV is the repository's environment and dependency workflow. The locked
+development environment includes CMake and Ninja, so no project-specific
+system CMake installation is required.
 
-Our primary platform is Linux, but nothing prevents it to be built and run on other OS.
-The following commands are for Linux users.
-Other users are encouraged to add the corresponding instructions for required steps in this README.
+## Set up and install
 
-## Build
-
-Install dependencies once:
-
-```
-sudo apt install -y cmake g++
-```
-
-Build using cmake:
-
-```
-cmake -B build -S .
-cmake --build build -j
-```
-
-or
-
-```
-mkdir -p build
-pushd build
-cmake ..
-make -j VERBOSE=1
-popd
-```
-
-## Test
-
-To run unit tests:
-
-```
-ctest --test-dir build -j
-```
-
-or
-
-```
-pushd build
-ctest -j
-popd
-```
-
-or
-
-```
-build/bin/test/back-tester-tests
-```
-
-## Run
-
-Back-tester:
-
-```
-build/bin/back-tester
-```
-
-## Contributing
-
-Install UV, create a virtual environment, and install the project dependencies:
+Create the locked environment and build the editable native Python extension:
 
 ```bash
 curl -LsSf https://astral.sh/uv/install.sh | sh
-uv sync
+uv sync --locked
+uv run pip install -e .
+uv run python -c "import back_tester; print(back_tester.__file__); print(back_tester.version())"
 ```
 
-Then activate the virtual environment and set up the git pre-commit hooks:
+The distribution name is `back-tester-cmf`. Its import package is
+`back_tester`, which loads the minimal native module `back_tester._backtester`.
+
+## Native build and tests
+
+Configure a clean Release build with tests enabled:
 
 ```bash
-source .venv/bin/activate
-pre-commit install
+uv run cmake -S . -B build-m0 -DCMAKE_BUILD_TYPE=Release -DBUILD_TESTS=ON
+uv run cmake --build build-m0 -j
+uv run ctest --test-dir build-m0 --output-on-failure
 ```
 
-After that, formatting and linting will run automatically before each commit.  
-If the source code does not meet the required formatting rules, the hook will 
-modify the files and stop the commit, and you will need to stage the updated 
-changes manually.
+The test executable uses a small checked-in test runner. Native test
+configuration does not download dependencies and does not require anything in
+`3rdparty/`.
 
-To run formatting and linting yourself, use one of these commands:
+## CLI smoke run
+
+The CLI requires exactly one data path. With no path it prints usage and exits
+with status 64:
 
 ```bash
-pre-commit run --files file.py
-pre-commit run --all-files
+build-m0/bin/back-tester
 ```
 
-The current pre-commit hooks do the following:
+Run ingestion against the deterministic checked-in fixture:
+
+```bash
+build-m0/bin/back-tester test/data/tiny_mbo.jsonl
+```
+
+A missing or unreadable path exits with status 2.
+
+## Development checks
+
+Install the pre-commit hooks or run all configured formatters and linters:
+
+```bash
+uv run pre-commit install
+uv run pre-commit run --all-files
+```
+
+The hooks:
+
 - format and lint C++ code with `clang-format`;
 - format and lint Python code with `ruff`;
 - strip outputs from Jupyter notebooks.

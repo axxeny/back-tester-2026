@@ -1,27 +1,29 @@
 include(CTest)
 
-if (EXISTS ${CMAKE_SOURCE_DIR}/3rdparty/Catch2/extras/Catch.cmake)
-    include(${CMAKE_SOURCE_DIR}/3rdparty/Catch2/extras/Catch.cmake)
-else()
-    function(catch_discover_tests TARGET)
-    # Dummy macro to satisfy CMake until it fetches Catch2 repo.
-    endfunction()
-endif()
-
 set(CMAKE_RUNTIME_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR}/bin/test)
 
-file(GLOB TEST_SRC CONFIGURE_DEPENDS *.cpp)
-
-# executable
 set(TARGET back-tester-tests)
-add_executable(${TARGET} ${TEST_SRC})
+add_executable(${TARGET}
+    BasicTypesTest.cpp
+    SimulatedLOBTest.cpp
+    TestMain.cpp
+)
 
-# Link against the necessary libraries
 target_link_libraries(${TARGET} PRIVATE
-    Catch2-static-lib
     back-tester-common
     back-tester-lib
 )
 
-# Register the tests with CTest
-catch_discover_tests(${TARGET})
+add_test(NAME native-unit-tests COMMAND ${TARGET})
+
+add_test(
+    NAME cli-missing-path
+    COMMAND ${CMAKE_COMMAND}
+        -DCLI_PATH=$<TARGET_FILE:back-tester>
+        -P ${CMAKE_CURRENT_SOURCE_DIR}/CheckCliUsage.cmake
+)
+
+add_test(
+    NAME cli-tiny-fixture
+    COMMAND $<TARGET_FILE:back-tester> ${CMAKE_CURRENT_SOURCE_DIR}/data/tiny_mbo.jsonl
+)

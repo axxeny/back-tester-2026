@@ -2,7 +2,7 @@
 
 #include "common/BasicTypes.hpp"
 
-#include "catch_amalgamated.hpp"
+#include "MiniTest.hpp"
 
 using namespace cmf;
 
