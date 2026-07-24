@@ -7,7 +7,7 @@ build-backend = "scikit_build_core.build"
 
 [project]
 name = "back-tester-cmf"
-version = "0.0.0"
+version = "0.0.1"
 description = "CMF Advanced Backtesting Engine for Options"
 authors = [
     {name = "CMF Team", email = "cmfteam2018@gmail.com"},
@@ -26,6 +26,7 @@ dev = [
     "ninja>=1.11",
     "pip>=24",
     "pre-commit>=4.5.1",
+    "pytest>=8.3",
 ]
 
 [tool.scikit-build]

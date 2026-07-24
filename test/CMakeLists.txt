@@ -11,6 +11,7 @@ add_executable(${TARGET}
     SimulatedLOBTest.cpp
     TradingTest.cpp
     ResultsTest.cpp
+    RuntimeTest.cpp
     TestMain.cpp
 )
 

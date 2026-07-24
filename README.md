@@ -21,7 +21,43 @@ uv run python -c "import back_tester; print(back_tester.__file__); print(back_te
 ```
 
 The distribution name is `back-tester-cmf`. Its import package is
-`back_tester`, which loads the minimal native module `back_tester._backtester`.
+`back_tester`, which loads `back_tester._backtester`.
+
+## Python strategy API
+
+`backtest.run()` drives the real streaming JSONL reader, historical book,
+scheduler, trading engine, and native result recorder:
+
+```python
+from back_tester import DateRange, Side, Strategy, backtest
+
+
+class BuyTouch(Strategy):
+    def on_book_update(self, update):
+        if update.asks:
+            self.submit_limit(
+                update.instrument_id, Side.BUY, update.asks[0].price, 1
+            )
+
+
+result = backtest.run(BuyTouch(), "data/sample.mbo.jsonl", DateRange())
+print(result.fills_df)
+print(result.order_log_df)
+print(result.pnl_series)
+```
+
+The three-argument form discovers only the unique numeric instrument IDs in a
+metadata pass and then replays the file as a stream. It uses Databento
+nanounits (`price_scale=1_000_000_000`, tick size 1, multiplier 1). Pass an
+explicit `instruments=[InstrumentMeta(...)]` list for a one-pass replay and
+real tick sizes or option multipliers.
+
+The optional `BacktestConfig` defaults to zero market-data latency, a strictly
+positive one-nanosecond order latency, and top-15 callbacks. Strategy context
+methods are intentionally available only while a callback is active. Result
+DataFrames and the PnL Series are built in bulk from frozen typed native
+columns; callback-scoped book levels are copied into immutable Python-owned
+payloads.
 
 ## Native build and tests
 
@@ -31,6 +67,8 @@ Configure a clean Release build with tests enabled:
 uv run cmake -S . -B build-m0 -DCMAKE_BUILD_TYPE=Release -DBUILD_TESTS=ON
 uv run cmake --build build-m0 -j
 uv run ctest --test-dir build-m0 --output-on-failure
+uv run pytest -q python/tests
+uv run python python/benchmarks/callback_overhead.py
 ```
 
 The test executable uses a small checked-in test runner. Native test
