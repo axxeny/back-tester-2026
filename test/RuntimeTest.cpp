@@ -76,6 +76,90 @@ TEST_CASE("Runtime streams atomic group into real trading and results",
   REQUIRE(frozen.order_log().size() == 3);
 }
 
+TEST_CASE("Runtime applies a prefetched market group only at dispatch",
+          "[Runtime]") {
+  TempFile source("back-tester-runtime-causality.jsonl");
+  {
+    std::ofstream output(source.getPath());
+    output
+        << R"({"ts_recv":"1970-01-01T00:00:00.000000100Z","hd":{"ts_event":"1970-01-01T00:00:00.000000100Z","instrument_id":1},"action":"A","side":"B","price":"99","size":3,"order_id":"10","flags":0,"sequence":1})"
+        << '\n'
+        << R"({"ts_recv":"1970-01-01T00:00:00.000000100Z","hd":{"ts_event":"1970-01-01T00:00:00.000000100Z","instrument_id":1},"action":"A","side":"A","price":"102","size":2,"order_id":"11","flags":128,"sequence":2})"
+        << '\n'
+        << R"({"ts_recv":"1970-01-01T00:00:00.000000200Z","hd":{"ts_event":"1970-01-01T00:00:00.000000200Z","instrument_id":1},"action":"M","side":"A","price":"101","size":2,"order_id":"11","flags":128,"sequence":3})"
+        << '\n';
+  }
+
+  class CausalityStrategy final : public trading::Strategy {
+  public:
+    void on_book_update(const BookUpdateView &view,
+                        trading::StrategyContext &context) override {
+      if (order_id == 0) {
+        order_id = context.submit_limit(view.instrument_id, Side::Buy,
+                                        101'000'000'000, 1);
+      }
+    }
+
+    void on_fill(const FillView &fill, trading::StrategyContext &) override {
+      fill_exchange_time = fill.exchange_ts_ns;
+      fill_engine_time = fill.engine_ts_ns;
+    }
+
+    ClOrdId order_id{};
+    TimestampNs fill_exchange_time{};
+    TimestampNs fill_engine_time{};
+  } strategy;
+
+  const auto frozen = runtime::run_backtest(
+      strategy, source.getPath().string(), DateRange{}, BacktestConfig{0, 5, 1},
+      std::vector{InstrumentMeta{1, 1, 1'000'000'000, 1}});
+
+  REQUIRE(strategy.fill_exchange_time == 200);
+  REQUIRE(strategy.fill_engine_time == 200);
+  REQUIRE(frozen.fills().size() == 1);
+  REQUIRE(frozen.fills().exchange_ts_ns.front() == 200);
+  REQUIRE(frozen.fills().engine_ts_ns.front() == 200);
+}
+
+TEST_CASE("Runtime suppresses empty depth until the first actual change",
+          "[Runtime]") {
+  TempFile source("back-tester-runtime-empty-depth.jsonl");
+  {
+    std::ofstream output(source.getPath());
+    output
+        << R"({"ts_recv":"1970-01-01T00:00:00.000000100Z","hd":{"ts_event":"1970-01-01T00:00:00.000000100Z","instrument_id":1},"action":"T","side":"B","price":"100","size":1,"flags":128,"sequence":1})"
+        << '\n'
+        << R"({"ts_recv":"1970-01-01T00:00:00.000000200Z","hd":{"ts_event":"1970-01-01T00:00:00.000000200Z","instrument_id":1},"action":"A","side":"B","price":"99","size":2,"order_id":"10","flags":128,"sequence":2})"
+        << '\n';
+  }
+
+  class DepthStrategy final : public trading::Strategy {
+  public:
+    void on_trade(const TradeView &trade, trading::StrategyContext &) override {
+      callbacks.push_back("trade");
+      trade_sequences.push_back(trade.sequence);
+    }
+
+    void on_book_update(const BookUpdateView &view,
+                        trading::StrategyContext &) override {
+      callbacks.push_back("book");
+      book_sequences.push_back(view.sequence);
+    }
+
+    std::vector<std::string> callbacks;
+    std::vector<Sequence> trade_sequences;
+    std::vector<Sequence> book_sequences;
+  } strategy;
+
+  (void)runtime::run_backtest(
+      strategy, source.getPath().string(), DateRange{}, BacktestConfig{0, 5, 1},
+      std::vector{InstrumentMeta{1, 1, 1'000'000'000, 1}});
+
+  REQUIRE(strategy.callbacks == std::vector<std::string>({"trade", "book"}));
+  REQUIRE(strategy.trade_sequences == std::vector<Sequence>({1}));
+  REQUIRE(strategy.book_sequences == std::vector<Sequence>({2}));
+}
+
 TEST_CASE("Runtime rejects an unterminated atomic source group", "[Runtime]") {
   TempFile source("back-tester-runtime-unterminated.jsonl");
   {

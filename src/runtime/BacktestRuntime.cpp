@@ -54,6 +54,16 @@ public:
   }
 
   bool next(ScheduledEvent &scheduled) {
+    if (group_staged_) {
+      throw std::logic_error(
+          "historical source advanced before staged group dispatch");
+    }
+    // The scheduler calls next() only after the prior delivery is
+    // acknowledged, so this is the first point where its spans may be reused.
+    bids_.clear();
+    asks_.clear();
+    trades_.clear();
+
     for (;;) {
       market::MarketDataEvent first;
       if (!reader_.next(first)) {
@@ -62,7 +72,6 @@ public:
 
       const InstrumentId instrument_id = first.instrument_id;
       const TimestampNs exchange_time = first.exchange_ts_ns;
-      bool contains_clear = false;
       group_.clear();
       group_.push_back(first);
       while (!group_.back().is_last_in_group()) {
@@ -88,67 +97,92 @@ public:
         return false;
       }
 
-      trades_.clear();
-      for (const auto &event : group_) {
-        books_.apply(event);
-        contains_clear =
-            contains_clear || event.action == market::MarketAction::Clear;
-        if (event.action == market::MarketAction::Trade) {
-          trades_.push_back(TradeView{
-              event.instrument_id,
-              event.exchange_ts_ns,
-              checked_delivery_time(event.exchange_ts_ns,
-                                    config_.market_data_latency_ns),
-              event.source_sequence,
-              event.side,
-              event.price_ticks.value(),
-              event.quantity,
-          });
-        }
-      }
-
-      const auto *book = books_.find(instrument_id);
-      if (book == nullptr) {
-        throw std::logic_error("historical store lost applied instrument");
-      }
-      bids_.clear();
-      asks_.clear();
-      for (const auto &level : book->top_bids(config_.book_depth)) {
-        bids_.push_back(BookLevel{level.price, level.quantity});
-      }
-      for (const auto &level : book->top_asks(config_.book_depth)) {
-        asks_.push_back(BookLevel{level.price, level.quantity});
-      }
-
-      auto &previous = previous_depth_[instrument_id];
-      const bool changed = !previous.has_value() ||
-                           !equal_levels(previous->bids, bids_) ||
-                           !equal_levels(previous->asks, asks_);
       const TimestampNs engine_time =
           checked_delivery_time(exchange_time, config_.market_data_latency_ns);
-      std::optional<BookUpdateView> book_update;
-      if (changed) {
-        previous = CachedDepth{bids_, asks_};
-        book_update.emplace(BookUpdateView{
-            instrument_id,
-            exchange_time,
-            engine_time,
-            group_.back().source_sequence,
-            contains_clear,
-            bids_,
-            asks_,
-        });
-      }
+      group_staged_ = true;
       scheduled = ScheduledEvent{MarketDelivery{
           instrument_id,
           exchange_time,
           engine_time,
           group_.back().source_sequence,
-          book_update,
-          trades_,
+          std::nullopt,
+          {},
       }};
       return true;
     }
+  }
+
+  void prepare_for_dispatch(ScheduledEvent &scheduled) {
+    if (!group_staged_) {
+      throw std::logic_error("historical source has no staged market group");
+    }
+    const auto *staged = std::get_if<MarketDelivery>(&scheduled.payload());
+    if (staged == nullptr || group_.empty() ||
+        staged->instrument_id != group_.front().instrument_id ||
+        staged->exchange_ts_ns != group_.front().exchange_ts_ns ||
+        staged->source_sequence != group_.back().source_sequence) {
+      throw std::logic_error(
+          "scheduled market event does not match staged group");
+    }
+
+    bool contains_clear = false;
+    for (const auto &event : group_) {
+      books_.apply(event);
+      contains_clear =
+          contains_clear || event.action == market::MarketAction::Clear;
+      if (event.action == market::MarketAction::Trade) {
+        trades_.push_back(TradeView{
+            event.instrument_id,
+            event.exchange_ts_ns,
+            staged->engine_ts_ns,
+            event.source_sequence,
+            event.side,
+            event.price_ticks.value(),
+            event.quantity,
+        });
+      }
+    }
+
+    const InstrumentId instrument_id = staged->instrument_id;
+    const auto *book = books_.find(instrument_id);
+    if (book == nullptr) {
+      throw std::logic_error("historical store lost applied instrument");
+    }
+    for (const auto &level : book->top_bids(config_.book_depth)) {
+      bids_.push_back(BookLevel{level.price, level.quantity});
+    }
+    for (const auto &level : book->top_asks(config_.book_depth)) {
+      asks_.push_back(BookLevel{level.price, level.quantity});
+    }
+
+    auto [previous, inserted] =
+        previous_depth_.try_emplace(instrument_id, CachedDepth{});
+    (void)inserted;
+    const bool changed = !equal_levels(previous->second.bids, bids_) ||
+                         !equal_levels(previous->second.asks, asks_);
+    std::optional<BookUpdateView> book_update;
+    if (changed) {
+      previous->second = CachedDepth{bids_, asks_};
+      book_update.emplace(BookUpdateView{
+          instrument_id,
+          staged->exchange_ts_ns,
+          staged->engine_ts_ns,
+          staged->source_sequence,
+          contains_clear,
+          bids_,
+          asks_,
+      });
+    }
+
+    scheduled = ScheduledEvent{MarketDelivery{
+        instrument_id,
+        staged->exchange_ts_ns,
+        staged->engine_ts_ns,
+        staged->source_sequence,
+        book_update,
+        trades_,
+    }};
+    group_staged_ = false;
   }
 
 private:
@@ -157,11 +191,12 @@ private:
   market::HistoricalLOBStore &books_;
   DateRange range_;
   BacktestConfig config_;
-  std::unordered_map<InstrumentId, std::optional<CachedDepth>> previous_depth_;
+  std::unordered_map<InstrumentId, CachedDepth> previous_depth_;
   std::vector<market::MarketDataEvent> group_;
   std::vector<BookLevel> bids_;
   std::vector<BookLevel> asks_;
   std::vector<TradeView> trades_;
+  bool group_staged_{};
 };
 
 void validate(DateRange range, BacktestConfig config,

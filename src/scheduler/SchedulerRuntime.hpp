@@ -68,14 +68,22 @@ private:
   std::size_t index_{};
 };
 
-// A source is pulled one delivery at a time. Any non-owning spans in the
-// returned MarketDelivery must remain valid until the next call to next();
-// SchedulerRuntime does not request it before processed_seq acknowledges the
-// current delivery.
+// A source is pulled one delivery at a time. A source may stage an inexpensive
+// market key in next() and expose prepare_for_dispatch(ScheduledEvent &) to
+// materialize the delivery only after it wins chronological selection. Any
+// non-owning spans in the returned MarketDelivery must remain valid until the
+// next call to next(); SchedulerRuntime does not request it before
+// processed_seq acknowledges the current delivery.
 template <typename Source>
 concept ScheduledEventSource = requires(Source &source, ScheduledEvent &event) {
   { source.next(event) } -> std::same_as<bool>;
 };
+
+template <typename Source>
+concept PreparedScheduledEventSource =
+    requires(Source &source, ScheduledEvent &event) {
+      { source.prepare_for_dispatch(event) } -> std::same_as<void>;
+    };
 
 class SchedulerRuntime {
 public:
@@ -189,6 +197,14 @@ private:
           throw SchedulerError("dispatch sequence exhausted");
         }
         ++next_dispatch_sequence_;
+        if (pending.priority() == EventPriority::MarketData) {
+          prepare_for_dispatch(source, pending);
+          if (pending.key() != pending_key ||
+              pending.priority() != EventPriority::MarketData) {
+            throw SchedulerError(
+                "source preparation changed the scheduled market key");
+          }
+        }
         auto dispatched =
             with_dispatch_sequence(pending, next_dispatch_sequence_);
 
@@ -205,6 +221,16 @@ private:
     } catch (...) {
       capture_failure(std::current_exception());
       request_stop();
+    }
+  }
+
+  template <ScheduledEventSource Source>
+  static void prepare_for_dispatch(Source &source, ScheduledEvent &event) {
+    if (event.priority() != EventPriority::MarketData) {
+      return;
+    }
+    if constexpr (PreparedScheduledEventSource<Source>) {
+      source.prepare_for_dispatch(event);
     }
   }
 

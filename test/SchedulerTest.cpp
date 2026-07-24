@@ -75,6 +75,24 @@ struct CountingSource {
   }
 };
 
+struct PreparingSource {
+  std::span<const ScheduledEvent> events;
+  std::vector<Sequence> prepared;
+  std::size_t index{};
+
+  bool next(ScheduledEvent &event) {
+    if (index == events.size()) {
+      return false;
+    }
+    event = events[index++];
+    return true;
+  }
+
+  void prepare_for_dispatch(ScheduledEvent &event) {
+    prepared.push_back(event.key().source_or_command_sequence);
+  }
+};
+
 template <typename Function> bool throws_scheduler_error(Function &&function) {
   try {
     function();
@@ -223,6 +241,38 @@ TEST_CASE("Scheduler runtime merges callback commands by arrival time",
   REQUIRE(recording.keys == expected);
   REQUIRE(recording.dispatch_sequences == std::vector<Sequence>({1, 2, 3, 4}));
   REQUIRE(runtime.processed_sequence() == 4);
+}
+
+TEST_CASE("Market source prepares only after chronological selection",
+          "[Scheduler]") {
+  const std::array initial{market(100, 10), market(300, 20)};
+  PreparingSource source{initial, {}, 0};
+  SchedulerRuntime runtime(SchedulerRuntimeConfig{DateRange{}, 1, 1, 8});
+  RecordingConsumer recording;
+  bool command_sent = false;
+
+  runtime.run(source, [&](const ScheduledEvent &event, CommandSink &commands) {
+    recording(event, commands);
+    if (event.priority() == EventPriority::MarketData &&
+        event.key().scheduled_ts_ns == 100) {
+      REQUIRE(source.prepared == std::vector<Sequence>({10}));
+      command_sent = true;
+      REQUIRE(commands.push(new_order(200, 1)));
+    } else if (event.priority() == EventPriority::NewOrder) {
+      REQUIRE(command_sent);
+      REQUIRE(source.prepared == std::vector<Sequence>({10}));
+    } else {
+      REQUIRE(source.prepared == std::vector<Sequence>({10, 20}));
+    }
+  });
+
+  const std::vector<ScheduledKey> expected{
+      {100, EventPriority::MarketData, 10},
+      {200, EventPriority::NewOrder, 1},
+      {300, EventPriority::MarketData, 20},
+  };
+  REQUIRE(recording.keys == expected);
+  REQUIRE(source.prepared == std::vector<Sequence>({10, 20}));
 }
 
 TEST_CASE("Dispatcher does not publish the next event before acknowledgement",

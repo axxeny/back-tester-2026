@@ -346,6 +346,7 @@ def test_delivery_callback_order_is_fills_then_trades_then_book(tmp_path):
         def __init__(self):
             super().__init__()
             self.events = []
+            self.fill_times = []
             self.submitted = False
 
         def on_book_update(self, update):
@@ -356,6 +357,7 @@ def test_delivery_callback_order_is_fills_then_trades_then_book(tmp_path):
 
         def on_fill(self, fill):
             self.events.append(("fill", fill.sequence))
+            self.fill_times.append((fill.exchange_ts_ns, fill.engine_ts_ns))
 
         def on_trade(self, trade):
             self.events.append(("trade", trade.sequence))
@@ -373,6 +375,44 @@ def test_delivery_callback_order_is_fills_then_trades_then_book(tmp_path):
         ("trade", 4),
         ("book", 4),
     ]
+    assert strategy.fill_times == [(200, 200)]
+
+
+def test_trade_only_empty_book_does_not_emit_initial_depth(tmp_path):
+    path = write_rows(
+        tmp_path,
+        [
+            row(1, action="T", side="B", price="100", size=1),
+            row(
+                2,
+                timestamp="1970-01-01T00:00:00.000000200Z",
+                side="B",
+                price="99",
+                size=2,
+                order_id=10,
+            ),
+        ],
+    )
+
+    class Capture(bt.Strategy):
+        def __init__(self):
+            super().__init__()
+            self.events = []
+
+        def on_trade(self, trade):
+            self.events.append(("trade", trade.sequence))
+
+        def on_book_update(self, update):
+            self.events.append(("book", update.sequence))
+
+    strategy = Capture()
+    empty_strategy_run(
+        path,
+        strategy,
+        config=bt.BacktestConfig(order_latency_ns=5, book_depth=1),
+        instruments=metadata(1),
+    )
+    assert strategy.events == [("trade", 1), ("book", 2)]
 
 
 @pytest.mark.parametrize("callback", ["book", "trade", "fill", "reject"])
