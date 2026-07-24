@@ -18,6 +18,10 @@ Use this file to prevent different agents from silently implementing incompatibl
 | ADR-010 | Accepted | State/position update precedes `on_fill()`/`on_reject()`. | Strategy observes consistent post-event state. | OrderManager, callbacks |
 | ADR-011 | Accepted | Python errors stop/unblock/join and are rethrown. | No deadlock or swallowed exceptions. | runtime, bindings |
 | ADR-012 | Accepted | C++ columnar buffers; one bulk Python conversion; no per-row append. | Assignment requirement and performance. | Result |
+| ADR-013 | Accepted project default | `DateRange` includes both endpoints for historical records; command arrivals at the end may execute, while arrivals strictly after the end do not. | Makes replay and scheduler end behavior deterministic. | source filter, scheduler |
+| ADR-014 | Accepted project default | Cancel arrival after terminal fill emits `RejectReason::AlreadyTerminal`. | Keeps late cancels observable instead of silently ignoring them. | OrderManager, reject callback |
+| ADR-015 | Accepted | Result enum columns use each enum's explicit fixed-width underlying encoding documented in `architecture/10_shared_contracts.md`. | Stabilizes the native/Python schema boundary. | core enums, result conversion |
+| ADR-016 | Accepted implementation boundary | M1 freezes result row values only; native buffer ownership and zero-copy lifetime are implemented and tested in M4. | Avoids an unverified ownership claim before result buffers exist. | results, Python boundary |
 
 ## Open or instructor-dependent decisions
 
@@ -25,7 +29,6 @@ Use this file to prevent different agents from silently implementing incompatibl
 |---|---|---|---|
 | OPEN-001 | Should cancel arrival have priority before new orders at the same timestamp? | New order before cancel. | Instructor clarification or failing golden test. |
 | OPEN-002 | Should event callbacks order trade before book update? | Fills, then trade, then book update. | Team contract change. |
-| OPEN-003 | Should pending commands after date-range end execute? | Do not execute arrivals strictly after end time; log/close according to end policy. | Product decision during integration. |
 | OPEN-004 | Exact PnL sample frequency. | On fill and mark-changing book update for held instruments. | Result consumer requirement. |
 
 ## New ADR template

@@ -5,6 +5,7 @@ set(CMAKE_RUNTIME_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR}/bin/test)
 set(TARGET back-tester-tests)
 add_executable(${TARGET}
     BasicTypesTest.cpp
+    CoreContractsTest.cpp
     SimulatedLOBTest.cpp
     TestMain.cpp
 )

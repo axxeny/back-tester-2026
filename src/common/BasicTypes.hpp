@@ -1,30 +1,17 @@
-// defines basic types used throught the code
-
 #pragma once
 
-#include <cstdint>
+#include "core/Types.hpp"
+
 #include <functional>
-#include <string>
-#include <string_view>
 
 namespace cmf {
 
-// Nanoseconds since Epoch
-using NanoTime = std::int64_t;
-
-using ClOrdId = std::uint64_t; // identifies client order id from trading system
-                               // to broker/exch
-using OrderId =
-    std::uint64_t; // identifies an order within a strategy on the market
+using NanoTime = TimestampNs;
+using OrderId = ExchangeOrderId;
 using StrategyId = std::uint16_t; // identifies a strategy
 using MarketId = std::uint16_t;   // identifies a market/exchange
-using SecurityId =
-    std::uint16_t; // identifies fungible security traded on 1 or more exchanges
-
-using Quantity = double;
-using Price = double;
-
-enum class Side : signed short { None = 0, Buy = 1, Sell = -1 };
+using SecurityId = InstrumentId;
+using Price = PriceTicks;
 
 enum class OrderType { None = 0, Limit, Market };
 
