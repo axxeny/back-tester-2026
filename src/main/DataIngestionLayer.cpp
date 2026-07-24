@@ -1,72 +1,41 @@
-#include <algorithm>
-#include <fstream>
 #include <iostream>
 #include <stdexcept>
 #include <string>
-#include <vector>
 
-#include "json.hpp"
-#include "LobRouter.hpp"
-#include "MarketDataEvent.hpp"
 #include "PerfStats.hpp"
+#include "market/HistoricalLOBStore.hpp"
+#include "market/JsonlReader.hpp"
 
-using json = nlohmann::json;
+int RunDataIngestionFile(const std::string &filePath) {
+  PerfStats stats;
+  stats.start();
 
-int RunDataIngestionFile(const std::string& filePath)
-{
-    PerfStats stats;
-    stats.start();
+  cmf::market::JsonlReader reader(filePath);
+  cmf::market::HistoricalLOBStore books;
+  cmf::market::MarketDataEvent event;
+  std::size_t eventCount = 0;
+  while (reader.next(event)) {
+    books.apply(event);
+    ++eventCount;
+  }
 
-    std::ifstream file(filePath);
-    if (!file.is_open())
-    {
-        std::cerr << "Cannot open file: " << filePath << std::endl;
-        return 2;
-    }
+  std::cout << "\n===== FINAL BEST BID / ASK =====\n";
+  for (const cmf::InstrumentId instrumentId : books.instrument_ids()) {
+    const auto *book = books.find(instrumentId);
+    const auto bid = book->best_bid();
+    const auto ask = book->best_ask();
+    std::cout << "instrument_id=" << instrumentId
+              << " best_bid=" << (bid ? std::to_string(bid->price) : "null")
+              << " best_bid_size=" << (bid ? bid->quantity : 0)
+              << " best_ask=" << (ask ? std::to_string(ask->price) : "null")
+              << " best_ask_size=" << (ask ? ask->quantity : 0) << "\n";
+  }
+  std::cout << "\n===== ROUTER STATS =====\n"
+            << "Events routed: " << eventCount << "\n"
+            << "Instruments:   " << books.size() << "\n";
 
-    std::vector<MarketDataEvent> events;
-    std::string line;
+  stats.finish(eventCount);
+  stats.print(std::cout);
 
-    while (std::getline(file, line))
-    {
-        if (line.empty())
-            continue;
-
-        try
-        {
-            json j = json::parse(line);
-            events.push_back(MarketDataEvent::fromJson(j));
-        }
-        catch (const std::exception& ex)
-        {
-            std::cerr << "JSON parse error: " << ex.what() << std::endl;
-        }
-    }
-
-    std::stable_sort(events.begin(), events.end(),
-        [](const MarketDataEvent& a, const MarketDataEvent& b)
-        {
-            if (a.tsRecv != b.tsRecv)
-                return a.tsRecv < b.tsRecv;
-
-            if (a.tsEvent != b.tsEvent)
-                return a.tsEvent < b.tsEvent;
-
-            return a.sequence < b.sequence;
-        });
-
-    LobRouter router(50000);
-
-    for (const auto& e : events)
-    {
-        router.route(e);
-    }
-
-    router.printFinalState(std::cout);
-    router.printStats(std::cout);
-
-    stats.finish(events.size());
-    stats.print(std::cout);
-
-    return 0;
+  return 0;
 }
