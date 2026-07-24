@@ -1,5 +1,11 @@
 # CMF Advanced Backtesting Engine for Options
 
+## Учебник
+
+Подробное русскоязычное объяснение архитектуры, связи Python с C++, полного
+пути события, matching, PnL, тестов и benchmarks находится в
+[`docs/tutorial/README.md`](docs/tutorial/README.md).
+
 ## Prerequisites
 
 - a C++20 compiler;
