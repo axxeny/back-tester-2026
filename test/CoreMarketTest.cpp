@@ -68,6 +68,14 @@ TEST_CASE("Market parsing converts exact decimals to integer ticks",
   REQUIRE(parse_decimal_ticks("001.2300", 10'000, 5) == 12'300);
   REQUIRE(parse_decimal_ticks("-1.25", 100, 5) == -125);
   REQUIRE(parse_decimal_ticks("+2", 100, 25) == 200);
+  REQUIRE(parse_decimal_ticks("9223372036854775807", 1, 1) ==
+          std::numeric_limits<cmf::PriceTicks>::max());
+  REQUIRE(parse_decimal_ticks("9223372036854775807.0", 1, 1) ==
+          std::numeric_limits<cmf::PriceTicks>::max());
+  REQUIRE(parse_decimal_ticks("-9223372036854775808", 1, 1) ==
+          std::numeric_limits<cmf::PriceTicks>::min());
+  REQUIRE(parse_decimal_ticks("-9223372036854775808.0", 1, 1) ==
+          std::numeric_limits<cmf::PriceTicks>::min());
 
   bool invalid_precision = false;
   try {
@@ -84,6 +92,22 @@ TEST_CASE("Market parsing converts exact decimals to integer ticks",
     invalid_tick = true;
   }
   REQUIRE(invalid_tick);
+
+  bool positive_overflow = false;
+  try {
+    (void)parse_decimal_ticks("9223372036854775808", 1, 1);
+  } catch (const std::out_of_range &) {
+    positive_overflow = true;
+  }
+  REQUIRE(positive_overflow);
+
+  bool negative_overflow = false;
+  try {
+    (void)parse_decimal_ticks("-9223372036854775809", 1, 1);
+  } catch (const std::out_of_range &) {
+    negative_overflow = true;
+  }
+  REQUIRE(negative_overflow);
 }
 
 TEST_CASE("Market parsing converts UTC timestamps once at nanosecond precision",
@@ -160,6 +184,57 @@ TEST_CASE("JSONL reader fails fast with source row and context",
       R"({"ts_recv":"2026-04-07T09:00:00Z","hd":{"ts_event":"2026-04-07T09:00:00Z","instrument_id":1},"action":"A","side":"B","price":"1","order_id":"1","sequence":1})");
   JsonlReader missing_reader(missing.getPath().string());
   REQUIRE(throws_source_error([&] { (void)missing_reader.next(output); }));
+}
+
+TEST_CASE("JSONL reader range-checks unsigned values for signed core fields",
+          "[CoreMarket]") {
+  cmf::TempFile file("backtester-core-market-unsigned-instrument.jsonl");
+  write_file(
+      file,
+      R"({"ts_recv":"2026-04-07T09:00:00Z","hd":{"ts_event":"2026-04-07T09:00:00Z","instrument_id":18446744073709551615},"action":"T","side":"B","price":"1","size":1,"sequence":1})");
+
+  JsonlReader reader(file.getPath().string());
+  TypedMarketDataEvent output;
+  bool typed_context = false;
+  try {
+    (void)reader.next(output);
+  } catch (const SourceError &error) {
+    typed_context =
+        error.row() == 1 && error.path() == file.getPath().string() &&
+        error.context().find("18446744073709551615") != std::string::npos &&
+        std::string(error.what()).find("outside int64 range") !=
+            std::string::npos;
+  }
+  REQUIRE(typed_context);
+}
+
+TEST_CASE("JSONL reader rejects blank physical rows without skipping",
+          "[CoreMarket]") {
+  cmf::TempFile first_blank("backtester-core-market-first-blank.jsonl");
+  write_file(first_blank, "   \t\n{}");
+  JsonlReader first_reader(first_blank.getPath().string());
+  TypedMarketDataEvent output;
+  bool first_row = false;
+  try {
+    (void)first_reader.next(output);
+  } catch (const SourceError &error) {
+    first_row = error.row() == 1 && error.context() == "   \t";
+  }
+  REQUIRE(first_row);
+
+  const std::string valid =
+      R"({"ts_recv":"2026-04-07T09:00:00Z","hd":{"ts_event":"2026-04-07T09:00:00Z","instrument_id":1},"action":"T","side":"B","price":"1","size":1,"sequence":1})";
+  cmf::TempFile middle_blank("backtester-core-market-middle-blank.jsonl");
+  write_file(middle_blank, valid + "\n\n" + valid);
+  JsonlReader middle_reader(middle_blank.getPath().string());
+  REQUIRE(middle_reader.next(output));
+  bool middle_row = false;
+  try {
+    (void)middle_reader.next(output);
+  } catch (const SourceError &error) {
+    middle_row = error.row() == 2 && error.context().empty();
+  }
+  REQUIRE(middle_row);
 }
 
 TEST_CASE("JSONL reader rejects chronology and source sequence regressions",

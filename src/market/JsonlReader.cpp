@@ -3,6 +3,8 @@
 #include "main/json.hpp"
 #include "market/Parsing.hpp"
 
+#include <algorithm>
+#include <cctype>
 #include <limits>
 #include <sstream>
 #include <utility>
@@ -39,6 +41,15 @@ using Json = nlohmann::json;
 
 [[nodiscard]] std::int64_t required_int64(const Json &object, const char *key) {
   const Json &value = required(object, key);
+  if (value.is_number_unsigned()) {
+    const auto unsigned_value = value.get<std::uint64_t>();
+    if (unsigned_value >
+        static_cast<std::uint64_t>(std::numeric_limits<std::int64_t>::max())) {
+      throw std::out_of_range(std::string("field '") + key +
+                              "' is outside int64 range");
+    }
+    return static_cast<std::int64_t>(unsigned_value);
+  }
   if (!value.is_number_integer()) {
     throw std::invalid_argument(std::string("field '") + key +
                                 "' must be an integer");
@@ -52,6 +63,9 @@ using Json = nlohmann::json;
     throw std::invalid_argument(std::string("field '") + key +
                                 "' must be an unsigned integer");
   }
+  if (value.is_number_unsigned()) {
+    return value.get<Sequence>();
+  }
   if (value.is_number_integer()) {
     const auto signed_value = value.get<std::int64_t>();
     if (signed_value < 0) {
@@ -60,7 +74,8 @@ using Json = nlohmann::json;
     }
     return static_cast<Sequence>(signed_value);
   }
-  return value.get<Sequence>();
+  throw std::invalid_argument(std::string("field '") + key +
+                              "' must be an unsigned integer");
 }
 
 [[nodiscard]] ExchangeOrderId parse_order_id(const Json &object) {
@@ -198,8 +213,11 @@ InstrumentMeta JsonlReader::instrument_meta(InstrumentId id) const {
 bool JsonlReader::next(MarketDataEvent &event) {
   while (std::getline(input_, current_line_)) {
     ++row_;
-    if (current_line_.empty()) {
-      continue;
+    if (std::all_of(
+            current_line_.begin(), current_line_.end(), [](char character) {
+              return std::isspace(static_cast<unsigned char>(character)) != 0;
+            })) {
+      fail("blank JSONL row");
     }
 
     try {

@@ -29,3 +29,10 @@ add_test(
     NAME cli-tiny-fixture
     COMMAND $<TARGET_FILE:back-tester> ${CMAKE_CURRENT_SOURCE_DIR}/data/tiny_mbo.jsonl
 )
+
+add_test(
+    NAME cli-invalid-unsigned-instrument
+    COMMAND $<TARGET_FILE:back-tester>
+        ${CMAKE_CURRENT_SOURCE_DIR}/data/invalid_unsigned_instrument.jsonl
+)
+set_tests_properties(cli-invalid-unsigned-instrument PROPERTIES WILL_FAIL TRUE)

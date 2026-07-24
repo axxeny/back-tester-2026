@@ -2,6 +2,7 @@
 
 #include <cctype>
 #include <limits>
+#include <numeric>
 #include <stdexcept>
 #include <string>
 
@@ -82,12 +83,28 @@ PriceTicks parse_decimal_ticks(std::string_view text, PriceTicks price_scale,
     throw std::invalid_argument("price has no digits");
   }
 
-  std::int64_t significand = 0;
-  std::int64_t denominator = 1;
+  const std::size_t decimal_position = text.find('.', position);
+  if (decimal_position != std::string_view::npos &&
+      text.find('.', decimal_position + 1) != std::string_view::npos) {
+    throw std::invalid_argument("price contains multiple decimal points");
+  }
+  if (decimal_position + 1 == text.size()) {
+    throw std::invalid_argument("price has invalid decimal syntax");
+  }
+
+  std::size_t effective_end = text.size();
+  if (decimal_position != std::string_view::npos) {
+    while (effective_end > decimal_position + 1 &&
+           text[effective_end - 1] == '0') {
+      --effective_end;
+    }
+  }
+
+  std::uint64_t significand = 0;
   bool seen_decimal = false;
   std::size_t digit_count = 0;
-  for (; position < text.size(); ++position) {
-    const char character = text[position];
+  for (std::size_t index = position; index < text.size(); ++index) {
+    const char character = text[index];
     if (character == '.' && !seen_decimal) {
       seen_decimal = true;
       continue;
@@ -95,36 +112,61 @@ PriceTicks parse_decimal_ticks(std::string_view text, PriceTicks price_scale,
     if (std::isdigit(static_cast<unsigned char>(character)) == 0) {
       throw std::invalid_argument("price contains a non-decimal character");
     }
-    if (significand > (std::numeric_limits<std::int64_t>::max() - 9) / 10) {
-      throw std::out_of_range("price significand overflows int64");
-    }
-    significand = significand * 10 + (character - '0');
     ++digit_count;
-    if (seen_decimal) {
-      if (denominator > std::numeric_limits<std::int64_t>::max() / 10) {
-        throw std::out_of_range("price precision is too large");
-      }
-      denominator *= 10;
+    if (index >= effective_end) {
+      continue;
     }
+    const auto digit = static_cast<std::uint64_t>(character - '0');
+    if (significand >
+        (std::numeric_limits<std::uint64_t>::max() - digit) / 10U) {
+      throw std::out_of_range("price significand overflows uint64");
+    }
+    significand = significand * 10U + digit;
   }
-  if (digit_count == 0 || text.back() == '.') {
+  if (digit_count == 0) {
     throw std::invalid_argument("price has invalid decimal syntax");
   }
 
-  const std::int64_t scaled = checked_multiply(significand, price_scale,
-                                               "scaled price overflows int64");
-  if (scaled % denominator != 0) {
+  const std::size_t fractional_digits =
+      decimal_position == std::string_view::npos ||
+              effective_end <= decimal_position + 1
+          ? 0
+          : effective_end - decimal_position - 1;
+  std::uint64_t denominator = 1;
+  for (std::size_t index = 0; index < fractional_digits; ++index) {
+    if (denominator > std::numeric_limits<std::uint64_t>::max() / 10U) {
+      throw std::out_of_range("price precision is too large");
+    }
+    denominator *= 10U;
+  }
+
+  const auto unsigned_scale = static_cast<std::uint64_t>(price_scale);
+  const std::uint64_t common_factor = std::gcd(unsigned_scale, denominator);
+  const std::uint64_t scale_factor = unsigned_scale / common_factor;
+  const std::uint64_t denominator_factor = denominator / common_factor;
+  if (significand % denominator_factor != 0) {
     throw std::invalid_argument("price cannot be represented by price scale");
   }
 
-  std::int64_t ticks = scaled / denominator;
-  if (negative) {
-    ticks = -ticks;
+  const std::uint64_t reduced_significand = significand / denominator_factor;
+  const std::uint64_t positive_limit =
+      static_cast<std::uint64_t>(std::numeric_limits<std::int64_t>::max());
+  const std::uint64_t magnitude_limit =
+      negative ? positive_limit + 1U : positive_limit;
+  if (reduced_significand > magnitude_limit / scale_factor) {
+    throw std::out_of_range("scaled price overflows int64");
   }
-  if (ticks % tick_size_ticks != 0) {
+  const std::uint64_t ticks_magnitude = reduced_significand * scale_factor;
+  if (ticks_magnitude % static_cast<std::uint64_t>(tick_size_ticks) != 0) {
     throw std::invalid_argument("price is not aligned to tick size");
   }
-  return ticks;
+  if (!negative) {
+    return static_cast<PriceTicks>(ticks_magnitude);
+  }
+  if (ticks_magnitude == positive_limit + 1U) {
+    return std::numeric_limits<PriceTicks>::min();
+  }
+  return -static_cast<PriceTicks>(ticks_magnitude);
 }
 
 TimestampNs parse_iso8601_timestamp_ns(std::string_view text) {
