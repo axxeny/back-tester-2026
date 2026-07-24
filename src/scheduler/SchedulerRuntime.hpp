@@ -1,5 +1,6 @@
 #pragma once
 
+#include "core/BacktestConfig.hpp"
 #include "scheduler/ChronologicalScheduler.hpp"
 #include "scheduler/ReadyBarrier.hpp"
 #include "scheduler/SpscRing.hpp"
@@ -35,9 +36,18 @@ private:
 };
 
 struct SchedulerRuntimeConfig {
-  std::size_t event_ring_capacity{1};
-  std::size_t command_ring_capacity{64};
-  std::size_t maximum_pending_events{4096};
+  explicit SchedulerRuntimeConfig(DateRange command_date_range,
+                                  std::size_t event_capacity = 1,
+                                  std::size_t command_capacity = 64,
+                                  std::size_t maximum_pending = 4096)
+      : date_range(command_date_range), event_ring_capacity(event_capacity),
+        command_ring_capacity(command_capacity),
+        maximum_pending_events(maximum_pending) {}
+
+  DateRange date_range;
+  std::size_t event_ring_capacity;
+  std::size_t command_ring_capacity;
+  std::size_t maximum_pending_events;
 };
 
 class SpanScheduledEventSource {
@@ -72,7 +82,8 @@ public:
   explicit SchedulerRuntime(SchedulerRuntimeConfig config)
       : event_ring_(config.event_ring_capacity),
         command_ring_(config.command_ring_capacity, &dispatcher_wake_),
-        ready_(&dispatcher_wake_), scheduler_(config.maximum_pending_events) {}
+        ready_(&dispatcher_wake_), scheduler_(config.maximum_pending_events),
+        date_range_(config.date_range) {}
 
   SchedulerRuntime(const SchedulerRuntime &) = delete;
   SchedulerRuntime &operator=(const SchedulerRuntime &) = delete;
@@ -251,6 +262,9 @@ private:
       const auto key = std::visit(
           [](const auto &payload) { return ScheduledEvent{payload}.key(); },
           command);
+      if (!date_range_.allows_command_arrival(key.scheduled_ts_ns)) {
+        continue;
+      }
       if (has_last_key_ && key < last_key_) {
         throw SchedulerError("command arrival would move time backwards");
       }
@@ -270,6 +284,7 @@ private:
   SpscRing<OrderCommand> command_ring_;
   ReadyBarrier ready_;
   ChronologicalScheduler scheduler_;
+  const DateRange date_range_;
   std::optional<ScheduledEvent> source_event_;
   bool source_exhausted_{false};
   std::atomic<bool> stopping_{false};

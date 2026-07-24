@@ -12,12 +12,14 @@
 #include <future>
 #include <stdexcept>
 #include <thread>
+#include <type_traits>
 #include <vector>
 
 namespace {
 
 using namespace std::chrono_literals;
 using cmf::CancelCommand;
+using cmf::DateRange;
 using cmf::EventPriority;
 using cmf::MarketDelivery;
 using cmf::NewOrderCommand;
@@ -32,6 +34,8 @@ using cmf::scheduler::SchedulerError;
 using cmf::scheduler::SchedulerRuntime;
 using cmf::scheduler::SchedulerRuntimeConfig;
 using cmf::scheduler::SpscRing;
+
+static_assert(!std::is_default_constructible_v<SchedulerRuntimeConfig>);
 
 ScheduledEvent market(cmf::TimestampNs time, Sequence sequence) {
   return ScheduledEvent{MarketDelivery{1, time - 10, time, sequence, {}, {}}};
@@ -197,7 +201,7 @@ TEST_CASE("Chronological scheduler uses time priority and stable sequence",
 TEST_CASE("Scheduler runtime merges callback commands by arrival time",
           "[Scheduler]") {
   const std::array initial{market(100, 10), market(300, 20)};
-  SchedulerRuntime runtime({1, 1, 8});
+  SchedulerRuntime runtime(SchedulerRuntimeConfig{DateRange{}, 1, 1, 8});
   RecordingConsumer recording;
   bool commands_sent = false;
 
@@ -225,7 +229,7 @@ TEST_CASE("Dispatcher does not publish the next event before acknowledgement",
           "[Scheduler]") {
   const std::array initial{market(100, 1), market(200, 2)};
   CountingSource source{initial};
-  SchedulerRuntime runtime({1, 1, 4});
+  SchedulerRuntime runtime(SchedulerRuntimeConfig{DateRange{}, 1, 1, 4});
   std::atomic<bool> first_entered{false};
   std::atomic<bool> release_first{false};
   std::atomic<int> calls{0};
@@ -257,7 +261,7 @@ TEST_CASE("Dispatcher does not publish the next event before acknowledgement",
 TEST_CASE("Consumer failure unblocks dispatcher and is rethrown",
           "[Scheduler]") {
   const std::array initial{market(100, 1), market(200, 2)};
-  SchedulerRuntime runtime({1, 1, 4});
+  SchedulerRuntime runtime(SchedulerRuntimeConfig{DateRange{}, 1, 1, 4});
   bool saw_original = false;
 
   try {
@@ -273,7 +277,7 @@ TEST_CASE("Consumer failure unblocks dispatcher and is rethrown",
 TEST_CASE("Runtime rejects a callback command that moves virtual time back",
           "[Scheduler]") {
   const std::array initial{market(100, 1)};
-  SchedulerRuntime runtime({1, 1, 4});
+  SchedulerRuntime runtime(SchedulerRuntimeConfig{DateRange{}, 1, 1, 4});
   bool sent = false;
   REQUIRE(throws_scheduler_error([&] {
     runtime.run(initial, [&](const ScheduledEvent &, CommandSink &commands) {
@@ -285,10 +289,64 @@ TEST_CASE("Runtime rejects a callback command that moves virtual time back",
   }));
 }
 
+TEST_CASE("Command arrival exactly at the date-range end is dispatched",
+          "[Scheduler]") {
+  const std::array initial{market(100, 1)};
+  SchedulerRuntime runtime(SchedulerRuntimeConfig{DateRange{0, 100}, 1, 1, 4});
+  RecordingConsumer recording;
+  bool sent = false;
+
+  runtime.run(initial, [&](const ScheduledEvent &event, CommandSink &commands) {
+    recording(event, commands);
+    if (!sent) {
+      sent = true;
+      REQUIRE(commands.push(new_order(100, 2)));
+    }
+  });
+
+  const std::vector<ScheduledKey> expected{
+      {100, EventPriority::MarketData, 1},
+      {100, EventPriority::NewOrder, 2},
+  };
+  REQUIRE(recording.keys == expected);
+  REQUIRE(runtime.processed_sequence() == 2);
+}
+
+TEST_CASE("Commands after the date-range end are skipped without stranding EOD",
+          "[Scheduler]") {
+  const std::array initial{market(90, 1), market(100, 2)};
+  SchedulerRuntime runtime(SchedulerRuntimeConfig{DateRange{0, 100}, 1, 1, 8});
+  RecordingConsumer recording;
+
+  runtime.run(initial, [&](const ScheduledEvent &event, CommandSink &commands) {
+    recording(event, commands);
+    if (event.priority() != EventPriority::MarketData) {
+      return;
+    }
+    if (event.key().scheduled_ts_ns == 90) {
+      REQUIRE(commands.push(cancel(100, 4)));
+      REQUIRE(commands.push(new_order(95, 3)));
+      REQUIRE(commands.push(cancel(101, 5)));
+    } else if (event.key().scheduled_ts_ns == 100) {
+      REQUIRE(commands.push(new_order(101, 6)));
+      REQUIRE(commands.push(cancel(200, 7)));
+    }
+  });
+
+  const std::vector<ScheduledKey> expected{
+      {90, EventPriority::MarketData, 1},
+      {95, EventPriority::NewOrder, 3},
+      {100, EventPriority::MarketData, 2},
+      {100, EventPriority::Cancel, 4},
+  };
+  REQUIRE(recording.keys == expected);
+  REQUIRE(runtime.processed_sequence() == 4);
+}
+
 TEST_CASE("Scheduler overflow stops a blocked command producer",
           "[Scheduler]") {
   const std::array initial{market(100, 1), market(500, 2)};
-  SchedulerRuntime runtime({1, 1, 1});
+  SchedulerRuntime runtime(SchedulerRuntimeConfig{DateRange{}, 1, 1, 1});
   bool sent = false;
   REQUIRE(throws_scheduler_error([&] {
     runtime.run(initial, [&](const ScheduledEvent &, CommandSink &commands) {
@@ -308,7 +366,7 @@ TEST_CASE("Twenty scheduler runs produce identical normalized order",
 
   for (int run = 0; run < 20; ++run) {
     const std::array initial{market(100, 1), market(100, 3), market(300, 9)};
-    SchedulerRuntime runtime({1, 1, 16});
+    SchedulerRuntime runtime(SchedulerRuntimeConfig{DateRange{}, 1, 1, 16});
     RecordingConsumer recording;
     bool sent = false;
     runtime.run(initial,
@@ -331,7 +389,7 @@ TEST_CASE("Twenty scheduler runs produce identical normalized order",
 }
 
 TEST_CASE("Runtime handles clean empty end-of-data", "[Scheduler]") {
-  SchedulerRuntime runtime({1, 1, 1});
+  SchedulerRuntime runtime(SchedulerRuntimeConfig{DateRange{}, 1, 1, 1});
   RecordingConsumer recording;
   runtime.run({}, recording);
   REQUIRE(recording.keys.empty());
