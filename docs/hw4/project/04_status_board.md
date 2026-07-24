@@ -9,10 +9,10 @@ Team Lead updates this file after every handoff, QA run, review, merge, or archi
 | Upstream branch | `main` |
 | HW4 integration branch | `hw4/backtest-engine-options` |
 | Reviewed starting commit | `c4f4c02916f5a9fb5f2636926fd93cd28af0f46d` |
-| Current integration commit | `9c7967a0210e10009c39d1d50951efe8d4ec81da` |
-| Current milestone | M5 |
-| Build status | M4B merged; Release CTest 6/6, ASan/UBSan 6/6, TSan 1/1 |
-| Python package status | Real runtime path merged; Python suite 18/18; native/Python version `0.0.1` |
+| Current integration commit | `a04ff0f6e27f74d6fe5077e2fc394516ffeff02b` |
+| Current milestone | M6 |
+| Build status | M5 merged; Release CTest 6/6 |
+| Python package status | End-to-end example merged; Python suite 21/21; native/Python version `0.0.1` |
 
 ## Milestone status
 
@@ -26,8 +26,8 @@ Team Lead updates this file after every handoff, QA run, review, merge, or archi
 | M3 Trading/matching | Trading developer | `2fa28d04` from `cb74071` | ✅ | ✅ | ✅ | ✅ | Re-QA PASS; re-review APPROVE; no P0/P1/P2 |
 | M4A Results/PnL | Results developer | `1a097e56` from `0984521` | ✅ | ✅ | ✅ | ✅ | Performance P1 fixed; re-QA PASS; re-review APPROVE |
 | M4B Python integration | Python/runtime developer | `9c7967a0` | ✅ | ✅ | ✅ | ✅ | Two P1 review findings fixed; final QA/review PASS; no P0/P1/P2 |
-| M5 End-to-end | Integration developer | `tasks/M5_end_to_end.md` from `9c7967a0` | 🟡 | ⬜ | ⬜ | ⬜ | Two-instrument deterministic checkpoint |
-| M6 Benchmarks/hardening | _assign_ | | ⬜ | ⬜ | ⬜ | ⬜ | |
+| M5 End-to-end | Integration developer | `a04ff0f6` | ✅ | ✅ | ✅ | ✅ | Independent QA/review PASS; no P0/P1/P2 |
+| M6 Benchmarks/hardening | Hardening developer | `tasks/M6_hardening_submission.md` from `a04ff0f6` | 🟡 | ⬜ | ⬜ | ⬜ | Final benchmarks and submission gates |
 
 Legend: ⬜ not started · 🟡 active · ✅ passed · ❌ failed · ⏸ blocked.
 
@@ -35,7 +35,7 @@ Legend: ⬜ not started · 🟡 active · ✅ passed · ❌ failed · ⏸ blocke
 
 | Task ID | Scope | Agent | Base | Owned files | Dependencies | State | Blocker |
 |---|---|---|---|---|---|---|---|
-| M5-001 | Deterministic two-instrument Python checkpoint | Integration developer | `9c7967a0` | examples, tiny fixture, E2E tests, README | M4B merged | Active | None |
+| M6-001 | Benchmarks, hardening, and final submission commands | Hardening developer | `a04ff0f6` | benchmarks, tests, README, traceability | M5 merged | Active | None |
 
 ## Open findings
 
@@ -73,3 +73,4 @@ Legend: ⬜ not started · 🟡 active · ✅ passed · ❌ failed · ⏸ blocke
 | M3-001 | `2fa28d04`; native 49/49, Release CTest 6/6, ASan/UBSan + TSan PASS | PASS after checked-accounting/latency fixes; full external harness | APPROVE; no P0/P1/P2 | Fast-forwarded |
 | M4A-001 | `1a097e56`; native 57/57, Release CTest 6/6, ASan/UBSan PASS | PASS; exact/lifetime/performance external harnesses | APPROVE after O(N²) ledger-copy fix; no P0/P1 | Fast-forwarded |
 | M4B-001 | `9c7967a0`; Release CTest 6/6, Python 18/18, ASan/UBSan + TSan PASS | PASS; causality, callback recursion, GIL/context and reuse adversarial coverage | APPROVE; no P0/P1/P2 | Fast-forwarded |
+| M5-001 | `a04ff0f6`; Release CTest 6/6, Python 21/21, example and 20x determinism PASS | PASS; external two-instrument/lifetime/recovery matrix | APPROVE; no P0/P1/P2 | Fast-forwarded |
