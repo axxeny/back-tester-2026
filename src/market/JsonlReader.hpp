@@ -5,6 +5,7 @@
 
 #include <cstddef>
 #include <fstream>
+#include <optional>
 #include <stdexcept>
 #include <string>
 #include <unordered_map>
@@ -30,7 +31,21 @@ class JsonlReader {
 public:
   using InstrumentMap = std::unordered_map<InstrumentId, InstrumentMeta>;
 
-  explicit JsonlReader(std::string path, InstrumentMap instruments = {});
+  struct UniformInstrumentPolicy {
+    PriceTicks tick_size_ticks{};
+    PriceTicks price_scale{};
+    Quantity contract_multiplier{1};
+  };
+
+  // Databento fixed prices use 1e-9 quoted-price units. Tick size one accepts
+  // every exactly representable Databento nanounit while rejecting finer input.
+  [[nodiscard]] static constexpr UniformInstrumentPolicy
+  databento_nanounit_policy() noexcept {
+    return UniformInstrumentPolicy{1, 1'000'000'000, 1};
+  }
+
+  explicit JsonlReader(std::string path, InstrumentMap instruments);
+  explicit JsonlReader(std::string path, UniformInstrumentPolicy policy);
 
   JsonlReader(const JsonlReader &) = delete;
   JsonlReader &operator=(const JsonlReader &) = delete;
@@ -46,6 +61,7 @@ private:
 
   std::string path_;
   InstrumentMap instruments_;
+  std::optional<UniformInstrumentPolicy> uniform_policy_;
   std::ifstream input_;
   std::size_t row_{};
   std::string current_line_;

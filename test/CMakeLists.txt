@@ -31,8 +31,23 @@ add_test(
 )
 
 add_test(
+    NAME cli-decimal-fixture
+    COMMAND ${CMAKE_COMMAND}
+        -DCLI_PATH=$<TARGET_FILE:back-tester>
+        -DDATA_PATH=${CMAKE_CURRENT_SOURCE_DIR}/data/decimal_mbo.jsonl
+        -P ${CMAKE_CURRENT_SOURCE_DIR}/CheckCliDecimal.cmake
+)
+
+add_test(
     NAME cli-invalid-unsigned-instrument
     COMMAND $<TARGET_FILE:back-tester>
         ${CMAKE_CURRENT_SOURCE_DIR}/data/invalid_unsigned_instrument.jsonl
 )
 set_tests_properties(cli-invalid-unsigned-instrument PROPERTIES WILL_FAIL TRUE)
+
+add_test(
+    NAME cli-invalid-subnanounit-price
+    COMMAND $<TARGET_FILE:back-tester>
+        ${CMAKE_CURRENT_SOURCE_DIR}/data/invalid_subnanounit_price.jsonl
+)
+set_tests_properties(cli-invalid-subnanounit-price PROPERTIES WILL_FAIL TRUE)

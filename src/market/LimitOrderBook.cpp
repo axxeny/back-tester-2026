@@ -35,6 +35,13 @@ Sequence LimitOrderBook::next_revision() {
   return book_revision_;
 }
 
+Sequence LimitOrderBook::next_liquidity_revision() {
+  if (liquidity_revision_counter_ == std::numeric_limits<Sequence>::max()) {
+    throw BookError("historical liquidity revision overflow");
+  }
+  return ++liquidity_revision_counter_;
+}
+
 void LimitOrderBook::change_level(Side side, PriceTicks price, Quantity delta) {
   if (side == Side::Buy) {
     auto iterator = bids_.find(price);
@@ -50,8 +57,11 @@ void LimitOrderBook::change_level(Side side, PriceTicks price, Quantity delta) {
       if (iterator != bids_.end()) {
         bids_.erase(iterator);
       }
+    } else if (iterator == bids_.end()) {
+      bids_.emplace(price, Level{updated, revision, {}});
     } else {
-      bids_[price] = Level{updated, revision};
+      iterator->second.quantity = updated;
+      iterator->second.revision = revision;
     }
     return;
   }
@@ -72,8 +82,34 @@ void LimitOrderBook::change_level(Side side, PriceTicks price, Quantity delta) {
     if (iterator != asks_.end()) {
       asks_.erase(iterator);
     }
+  } else if (iterator == asks_.end()) {
+    asks_.emplace(price, Level{updated, revision, {}});
   } else {
-    asks_[price] = Level{updated, revision};
+    iterator->second.quantity = updated;
+    iterator->second.revision = revision;
+  }
+}
+
+void LimitOrderBook::insert_order_reference(ExchangeOrderId order_id,
+                                            const Order &order) {
+  auto &level_value =
+      order.side == Side::Buy ? bids_.at(order.price) : asks_.at(order.price);
+  const auto [iterator, inserted] =
+      level_value.orders.emplace(order.priority, order_id);
+  (void)iterator;
+  if (!inserted) {
+    throw BookError("duplicate historical price-time priority key");
+  }
+}
+
+void LimitOrderBook::erase_order_reference(ExchangeOrderId order_id,
+                                           const Order &order) {
+  auto &level_value =
+      order.side == Side::Buy ? bids_.at(order.price) : asks_.at(order.price);
+  const auto erased = level_value.orders.erase(order.priority);
+  if (erased != 1) {
+    throw BookError("historical order priority index is inconsistent for id " +
+                    std::to_string(order_id));
   }
 }
 
@@ -82,25 +118,30 @@ void LimitOrderBook::add(const MarketDataEvent &event) {
       event.quantity <= 0) {
     throw BookError("invalid historical add");
   }
-  const Order incoming{event.side, *event.price_ticks, event.quantity};
   const auto existing = orders_.find(event.exchange_order_id);
   if (existing != orders_.end()) {
-    if (existing->second.side == incoming.side &&
-        existing->second.price == incoming.price &&
-        existing->second.quantity == incoming.quantity) {
+    if (existing->second.side == event.side &&
+        existing->second.price == *event.price_ticks &&
+        existing->second.quantity == event.quantity) {
       return;
     }
     throw BookError("conflicting duplicate historical order id " +
                     std::to_string(event.exchange_order_id));
   }
 
+  const Order incoming{event.side, *event.price_ticks, event.quantity,
+                       next_liquidity_revision(),
+                       PriorityKey{event.exchange_ts_ns, event.source_sequence,
+                                   event.exchange_order_id}};
   change_level(incoming.side, incoming.price, incoming.quantity);
   orders_.emplace(event.exchange_order_id, incoming);
+  insert_order_reference(event.exchange_order_id, incoming);
   ++total_adds_;
 }
 
 void LimitOrderBook::remove_order(ExchangeOrderId order_id,
                                   const Order &order) {
+  erase_order_reference(order_id, order);
   change_level(order.side, order.price, -order.quantity);
   orders_.erase(order_id);
 }
@@ -127,20 +168,24 @@ void LimitOrderBook::modify(const MarketDataEvent &event) {
   }
 
   const Order old_order = iterator->second;
-  const Order replacement{event.side, *event.price_ticks, event.quantity};
-  if (old_order.side == replacement.side &&
-      old_order.price == replacement.price &&
-      old_order.quantity == replacement.quantity) {
+  if (old_order.side == event.side && old_order.price == *event.price_ticks &&
+      old_order.quantity == event.quantity) {
     return;
   }
 
+  const Order replacement{
+      event.side, *event.price_ticks, event.quantity, next_liquidity_revision(),
+      PriorityKey{event.exchange_ts_ns, event.source_sequence,
+                  event.exchange_order_id}};
   remove_order(event.exchange_order_id, old_order);
   try {
     change_level(replacement.side, replacement.price, replacement.quantity);
     orders_.emplace(event.exchange_order_id, replacement);
+    insert_order_reference(event.exchange_order_id, replacement);
   } catch (...) {
     change_level(old_order.side, old_order.price, old_order.quantity);
     orders_.emplace(event.exchange_order_id, old_order);
+    insert_order_reference(event.exchange_order_id, old_order);
     throw;
   }
   ++total_modifies_;
@@ -160,10 +205,12 @@ void LimitOrderBook::fill(const MarketDataEvent &event) {
     throw BookError("historical fill exceeds resting quantity");
   }
 
-  change_level(order.side, order.price, -event.quantity);
   if (event.quantity == order.quantity) {
+    erase_order_reference(event.exchange_order_id, order);
+    change_level(order.side, order.price, -event.quantity);
     orders_.erase(iterator);
   } else {
+    change_level(order.side, order.price, -event.quantity);
     iterator->second.quantity -= event.quantity;
   }
   ++total_fills_;
@@ -246,6 +293,26 @@ LimitOrderBook::level(Side side, PriceTicks price) const {
   }
   throw BookError(std::string("cannot query ") + side_name(side) +
                   " level for Side::None");
+}
+
+HistoricalOrderSlice LimitOrderBook::make_slice(ExchangeOrderId order_id,
+                                                const Order &order) noexcept {
+  return HistoricalOrderSlice{order_id,
+                              order.side,
+                              order.price,
+                              order.quantity,
+                              order.liquidity_revision,
+                              order.priority.exchange_ts_ns,
+                              order.priority.source_sequence};
+}
+
+std::optional<HistoricalOrderSlice>
+LimitOrderBook::order_slice(ExchangeOrderId exchange_order_id) const {
+  const auto order = orders_.find(exchange_order_id);
+  if (order == orders_.end()) {
+    return std::nullopt;
+  }
+  return make_slice(exchange_order_id, order->second);
 }
 
 } // namespace cmf::market

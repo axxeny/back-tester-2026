@@ -20,6 +20,10 @@ using cmf::market::MarketAction;
 using TypedMarketDataEvent = cmf::market::MarketDataEvent;
 using cmf::market::SourceError;
 
+constexpr JsonlReader::UniformInstrumentPolicy unit_price_policy() {
+  return {1, 1, 1};
+}
+
 TypedMarketDataEvent event(MarketAction action, cmf::ExchangeOrderId order_id,
                            Side side = Side::None,
                            std::optional<cmf::PriceTicks> price = std::nullopt,
@@ -165,7 +169,8 @@ TEST_CASE("JSONL reader fails fast with source row and context",
           "[CoreMarket]") {
   cmf::TempFile malformed("backtester-core-market-malformed.jsonl");
   write_file(malformed, "{\"hd\":");
-  JsonlReader malformed_reader(malformed.getPath().string());
+  JsonlReader malformed_reader(malformed.getPath().string(),
+                               unit_price_policy());
   TypedMarketDataEvent output;
   bool saw_context = false;
   try {
@@ -182,7 +187,7 @@ TEST_CASE("JSONL reader fails fast with source row and context",
   write_file(
       missing,
       R"({"ts_recv":"2026-04-07T09:00:00Z","hd":{"ts_event":"2026-04-07T09:00:00Z","instrument_id":1},"action":"A","side":"B","price":"1","order_id":"1","sequence":1})");
-  JsonlReader missing_reader(missing.getPath().string());
+  JsonlReader missing_reader(missing.getPath().string(), unit_price_policy());
   REQUIRE(throws_source_error([&] { (void)missing_reader.next(output); }));
 }
 
@@ -193,7 +198,7 @@ TEST_CASE("JSONL reader range-checks unsigned values for signed core fields",
       file,
       R"({"ts_recv":"2026-04-07T09:00:00Z","hd":{"ts_event":"2026-04-07T09:00:00Z","instrument_id":18446744073709551615},"action":"T","side":"B","price":"1","size":1,"sequence":1})");
 
-  JsonlReader reader(file.getPath().string());
+  JsonlReader reader(file.getPath().string(), unit_price_policy());
   TypedMarketDataEvent output;
   bool typed_context = false;
   try {
@@ -212,7 +217,7 @@ TEST_CASE("JSONL reader rejects blank physical rows without skipping",
           "[CoreMarket]") {
   cmf::TempFile first_blank("backtester-core-market-first-blank.jsonl");
   write_file(first_blank, "   \t\n{}");
-  JsonlReader first_reader(first_blank.getPath().string());
+  JsonlReader first_reader(first_blank.getPath().string(), unit_price_policy());
   TypedMarketDataEvent output;
   bool first_row = false;
   try {
@@ -226,7 +231,8 @@ TEST_CASE("JSONL reader rejects blank physical rows without skipping",
       R"({"ts_recv":"2026-04-07T09:00:00Z","hd":{"ts_event":"2026-04-07T09:00:00Z","instrument_id":1},"action":"T","side":"B","price":"1","size":1,"sequence":1})";
   cmf::TempFile middle_blank("backtester-core-market-middle-blank.jsonl");
   write_file(middle_blank, valid + "\n\n" + valid);
-  JsonlReader middle_reader(middle_blank.getPath().string());
+  JsonlReader middle_reader(middle_blank.getPath().string(),
+                            unit_price_policy());
   REQUIRE(middle_reader.next(output));
   bool middle_row = false;
   try {
@@ -247,7 +253,8 @@ TEST_CASE("JSONL reader rejects chronology and source sequence regressions",
   cmf::TempFile chronology("backtester-core-market-chronology.jsonl");
   write_file(chronology, prefix + "2026-04-07T09:00:01Z" + suffix + "1}\n" +
                              prefix + "2026-04-07T09:00:00Z" + suffix + "2}");
-  JsonlReader chronology_reader(chronology.getPath().string());
+  JsonlReader chronology_reader(chronology.getPath().string(),
+                                unit_price_policy());
   TypedMarketDataEvent output;
   REQUIRE(chronology_reader.next(output));
   REQUIRE(throws_source_error([&] { (void)chronology_reader.next(output); }));
@@ -255,7 +262,7 @@ TEST_CASE("JSONL reader rejects chronology and source sequence regressions",
   cmf::TempFile sequence("backtester-core-market-sequence.jsonl");
   write_file(sequence, prefix + "2026-04-07T09:00:00Z" + suffix + "2}\n" +
                            prefix + "2026-04-07T09:00:00Z" + suffix + "2}");
-  JsonlReader sequence_reader(sequence.getPath().string());
+  JsonlReader sequence_reader(sequence.getPath().string(), unit_price_policy());
   REQUIRE(sequence_reader.next(output));
   REQUIRE(throws_source_error([&] { (void)sequence_reader.next(output); }));
 }
@@ -284,6 +291,13 @@ TEST_CASE("Historical L3 book handles all source actions and partial fills",
   REQUIRE(book.total_trades() == 1);
   book.apply(event(MarketAction::Cancel, 1));
   REQUIRE(book.order_count() == 0);
+  REQUIRE(throws_book_error([&] {
+    book.apply(event(MarketAction::Modify, 999, Side::Buy, 100, 1));
+  }));
+  REQUIRE(throws_book_error([&] {
+    book.apply(event(MarketAction::Fill, 999, Side::None, std::nullopt, 1));
+  }));
+  // Unknown cancel is a documented no-op so replay may start inside a range.
   book.apply(event(MarketAction::Cancel, 999));
   REQUIRE(book.total_cancels() == 1);
 
@@ -314,6 +328,115 @@ TEST_CASE("Historical duplicate policy cannot leave stale moved liquidity",
   REQUIRE(book.best_bid()->price == 100);
   REQUIRE(book.best_bid()->quantity == 5);
   REQUIRE_FALSE(book.level(Side::Buy, 101).has_value());
+}
+
+TEST_CASE("Historical liquidity identity supports private consumption",
+          "[CoreMarket]") {
+  TypedLimitOrderBook book;
+  auto original = event(MarketAction::Add, 10, Side::Sell, 101, 10);
+  original.exchange_ts_ns = 100;
+  original.source_sequence = 1;
+  book.apply(original);
+  const auto original_slice = book.order_slice(10);
+  REQUIRE(original_slice.has_value());
+
+  auto additional = event(MarketAction::Add, 11, Side::Sell, 101, 2);
+  additional.exchange_ts_ns = 101;
+  additional.source_sequence = 2;
+  book.apply(additional);
+  REQUIRE(book.order_slice(10)->liquidity_revision ==
+          original_slice->liquidity_revision);
+
+  cmf::Quantity private_available = 0;
+  std::vector<cmf::ExchangeOrderId> visit_order;
+  book.for_each_marketable_liquidity(
+      Side::Buy, 101, [&](const cmf::market::HistoricalOrderSlice &slice) {
+        visit_order.push_back(slice.exchange_order_id);
+        const cmf::Quantity consumed =
+            slice.exchange_order_id == 10 &&
+                    slice.liquidity_revision ==
+                        original_slice->liquidity_revision
+                ? 5
+                : 0;
+        private_available +=
+            std::max<cmf::Quantity>(0, slice.remaining_quantity - consumed);
+        return true;
+      });
+  REQUIRE(private_available == 7);
+  REQUIRE(visit_order.size() == 2);
+  REQUIRE(visit_order[0] == 10);
+  REQUIRE(visit_order[1] == 11);
+
+  book.apply(event(MarketAction::Fill, 10, Side::None, std::nullopt, 4));
+  REQUIRE(book.order_slice(10)->remaining_quantity == 6);
+  REQUIRE(book.order_slice(10)->liquidity_revision ==
+          original_slice->liquidity_revision);
+
+  private_available = 0;
+  book.for_each_marketable_liquidity(
+      Side::Buy, 101, [&](const cmf::market::HistoricalOrderSlice &slice) {
+        const cmf::Quantity consumed =
+            slice.exchange_order_id == 10 &&
+                    slice.liquidity_revision ==
+                        original_slice->liquidity_revision
+                ? 5
+                : 0;
+        private_available +=
+            std::max<cmf::Quantity>(0, slice.remaining_quantity - consumed);
+        return true;
+      });
+  REQUIRE(private_available == 3);
+
+  book.apply(event(MarketAction::Cancel, 10));
+  REQUIRE_FALSE(book.order_slice(10).has_value());
+  private_available = 0;
+  book.for_each_marketable_liquidity(
+      Side::Buy, 101, [&](const cmf::market::HistoricalOrderSlice &slice) {
+        private_available += slice.remaining_quantity;
+        return true;
+      });
+  REQUIRE(private_available == 2);
+}
+
+TEST_CASE("Historical replacement changes only replaced liquidity identity",
+          "[CoreMarket]") {
+  TypedLimitOrderBook book;
+  auto first = event(MarketAction::Add, 20, Side::Sell, 101, 4);
+  first.exchange_ts_ns = 100;
+  first.source_sequence = 1;
+  auto other = event(MarketAction::Add, 21, Side::Sell, 101, 6);
+  other.exchange_ts_ns = 100;
+  other.source_sequence = 2;
+  book.apply(first);
+  book.apply(other);
+  const auto first_revision = book.order_slice(20)->liquidity_revision;
+  const auto other_revision = book.order_slice(21)->liquidity_revision;
+
+  auto replacement = event(MarketAction::Modify, 20, Side::Sell, 101, 7);
+  replacement.exchange_ts_ns = 101;
+  replacement.source_sequence = 3;
+  book.apply(replacement);
+  REQUIRE(book.order_slice(20)->liquidity_revision != first_revision);
+  REQUIRE(book.order_slice(21)->liquidity_revision == other_revision);
+  REQUIRE(book.level(Side::Sell, 101)->quantity == 13);
+
+  book.apply(event(MarketAction::Cancel, 20));
+  auto readded = event(MarketAction::Add, 20, Side::Sell, 101, 3);
+  readded.exchange_ts_ns = 102;
+  readded.source_sequence = 4;
+  book.apply(readded);
+  REQUIRE(book.order_slice(20)->liquidity_revision != first_revision);
+  REQUIRE(book.order_slice(20)->liquidity_revision !=
+          book.order_slice(21)->liquidity_revision);
+  REQUIRE(book.order_slice(21)->liquidity_revision == other_revision);
+
+  const auto readded_revision = book.order_slice(20)->liquidity_revision;
+  book.apply(event(MarketAction::Clear, 0));
+  REQUIRE_FALSE(book.order_slice(20).has_value());
+  REQUIRE_FALSE(book.order_slice(21).has_value());
+  readded.source_sequence = 5;
+  book.apply(readded);
+  REQUIRE(book.order_slice(20)->liquidity_revision != readded_revision);
 }
 
 TEST_CASE("Historical top-N is ordered, bounded and tracks level revisions",
@@ -376,7 +499,7 @@ TEST_CASE("JSONL reader consumes a generated source incrementally",
     }
   }
 
-  JsonlReader reader(file.getPath().string());
+  JsonlReader reader(file.getPath().string(), unit_price_policy());
   TypedMarketDataEvent output;
   std::uint64_t count = 0;
   while (reader.next(output)) {

@@ -188,21 +188,35 @@ JsonlReader::JsonlReader(std::string path, InstrumentMap instruments)
   }
 }
 
+JsonlReader::JsonlReader(std::string path, UniformInstrumentPolicy policy)
+    : path_(std::move(path)), uniform_policy_(policy), input_(path_) {
+  if (policy.price_scale <= 0 || policy.tick_size_ticks <= 0 ||
+      policy.contract_multiplier <= 0) {
+    throw SourceError(path_, 0, {}, "invalid uniform instrument price policy");
+  }
+  if (!input_.is_open()) {
+    throw SourceError(path_, 0, {}, "cannot open source file");
+  }
+}
+
 InstrumentMeta JsonlReader::instrument_meta(InstrumentId id) const {
-  if (instruments_.empty()) {
-    return InstrumentMeta{id, 1, 1, 1};
-  }
   const auto iterator = instruments_.find(id);
-  if (iterator == instruments_.end()) {
-    throw std::invalid_argument("unknown instrument_id " + std::to_string(id));
+  if (iterator != instruments_.end()) {
+    const InstrumentMeta &meta = iterator->second;
+    if (meta.instrument_id != id || meta.price_scale <= 0 ||
+        meta.tick_size_ticks <= 0) {
+      throw std::invalid_argument(
+          "invalid instrument metadata for instrument_id " +
+          std::to_string(id));
+    }
+    return meta;
   }
-  const InstrumentMeta &meta = iterator->second;
-  if (meta.instrument_id != id || meta.price_scale <= 0 ||
-      meta.tick_size_ticks <= 0) {
-    throw std::invalid_argument(
-        "invalid instrument metadata for instrument_id " + std::to_string(id));
+  if (uniform_policy_.has_value()) {
+    return InstrumentMeta{id, uniform_policy_->tick_size_ticks,
+                          uniform_policy_->price_scale,
+                          uniform_policy_->contract_multiplier};
   }
-  return meta;
+  throw std::invalid_argument("unknown instrument_id " + std::to_string(id));
 }
 
 [[noreturn]] void JsonlReader::fail(const std::string &message) const {

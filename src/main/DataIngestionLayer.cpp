@@ -10,7 +10,8 @@ int RunDataIngestionFile(const std::string &filePath) {
   PerfStats stats;
   stats.start();
 
-  cmf::market::JsonlReader reader(filePath);
+  cmf::market::JsonlReader reader(
+      filePath, cmf::market::JsonlReader::databento_nanounit_policy());
   cmf::market::HistoricalLOBStore books;
   cmf::market::MarketDataEvent event;
   std::size_t eventCount = 0;
