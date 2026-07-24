@@ -16,6 +16,7 @@
 #include <span>
 #include <stdexcept>
 #include <string>
+#include <thread>
 #include <utility>
 #include <vector>
 
@@ -65,12 +66,25 @@ public:
 
   trading::StrategyContext *
   activate(trading::StrategyContext *active) noexcept {
+    active_thread_ =
+        active == nullptr ? std::thread::id{} : std::this_thread::get_id();
     return std::exchange(active_, active);
   }
 
+  void begin_run() {
+    // Binding entry and guard destruction hold the GIL; the flag is set before
+    // run() releases it, so another Python thread observes one owner.
+    if (running_) {
+      throw std::runtime_error("strategy is already running");
+    }
+    running_ = true;
+  }
+
+  void end_run() noexcept { running_ = false; }
+
 private:
   [[nodiscard]] trading::StrategyContext &context() const {
-    if (active_ == nullptr) {
+    if (active_ == nullptr || active_thread_ != std::this_thread::get_id()) {
       throw std::runtime_error(
           "strategy context is available only during a callback");
     }
@@ -78,6 +92,8 @@ private:
   }
 
   trading::StrategyContext *active_{};
+  std::thread::id active_thread_;
+  bool running_{};
 };
 
 class ActiveContext {
@@ -91,6 +107,21 @@ public:
 private:
   PythonStrategyHandle &handle_;
   trading::StrategyContext *previous_;
+};
+
+class StrategyRunGuard {
+public:
+  explicit StrategyRunGuard(PythonStrategyHandle &handle) : handle_(handle) {
+    handle_.begin_run();
+  }
+
+  ~StrategyRunGuard() { handle_.end_run(); }
+
+  StrategyRunGuard(const StrategyRunGuard &) = delete;
+  StrategyRunGuard &operator=(const StrategyRunGuard &) = delete;
+
+private:
+  PythonStrategyHandle &handle_;
 };
 
 class PythonStrategyAdapter final : public trading::Strategy {
@@ -130,8 +161,8 @@ private:
   template <typename Payload>
   void invoke(const char *method, Payload payload,
               trading::StrategyContext &context) {
-    ActiveContext active(*handle_, context);
     py::gil_scoped_acquire gil;
+    ActiveContext active(*handle_, context);
     strategy_.attr(method)(std::move(payload));
   }
 
@@ -366,9 +397,10 @@ PYBIND11_MODULE(_backtester, module) {
          std::optional<cmf::BacktestConfig> optional_config,
          std::optional<std::vector<cmf::InstrumentMeta>> optional_instruments) {
         auto handle = strategy.cast<std::shared_ptr<PythonStrategyHandle>>();
+        StrategyRunGuard run_guard(*handle);
         cmf::BacktestConfig config = optional_config.value_or(
             cmf::BacktestConfig{0, cmf::runtime::default_order_latency_ns, 15});
-        PythonStrategyAdapter adapter(std::move(strategy), std::move(handle));
+        PythonStrategyAdapter adapter(std::move(strategy), handle);
         cmf::results::FrozenResults frozen;
         {
           py::gil_scoped_release release;

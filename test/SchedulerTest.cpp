@@ -11,6 +11,7 @@
 #include <chrono>
 #include <future>
 #include <stdexcept>
+#include <string>
 #include <thread>
 #include <type_traits>
 #include <vector>
@@ -91,6 +92,39 @@ struct PreparingSource {
   void prepare_for_dispatch(ScheduledEvent &event) {
     prepared.push_back(event.key().source_or_command_sequence);
   }
+};
+
+struct ThrowingPreparingSource {
+  bool emitted{};
+
+  bool next(ScheduledEvent &event) {
+    if (emitted) {
+      return false;
+    }
+    emitted = true;
+    event = market(100, 1);
+    return true;
+  }
+
+  void prepare_for_dispatch(ScheduledEvent &) {
+    throw std::runtime_error("exact prepare failure");
+  }
+};
+
+struct MutatingPreparingSource {
+  ScheduledEvent replacement;
+  bool emitted{};
+
+  bool next(ScheduledEvent &event) {
+    if (emitted) {
+      return false;
+    }
+    emitted = true;
+    event = market(100, 1);
+    return true;
+  }
+
+  void prepare_for_dispatch(ScheduledEvent &event) { event = replacement; }
 };
 
 template <typename Function> bool throws_scheduler_error(Function &&function) {
@@ -273,6 +307,70 @@ TEST_CASE("Market source prepares only after chronological selection",
   };
   REQUIRE(recording.keys == expected);
   REQUIRE(source.prepared == std::vector<Sequence>({10, 20}));
+}
+
+TEST_CASE("Equal-time market prepares and dispatches before command",
+          "[Scheduler]") {
+  const std::array initial{market(100, 10), market(200, 20)};
+  PreparingSource source{initial, {}, 0};
+  SchedulerRuntime runtime(SchedulerRuntimeConfig{DateRange{}, 1, 1, 8});
+  RecordingConsumer recording;
+
+  runtime.run(source, [&](const ScheduledEvent &event, CommandSink &commands) {
+    recording(event, commands);
+    if (event.key().scheduled_ts_ns == 100) {
+      REQUIRE(commands.push(new_order(200, 1)));
+    } else if (event.priority() == EventPriority::NewOrder) {
+      REQUIRE(source.prepared == std::vector<Sequence>({10, 20}));
+    }
+  });
+
+  const std::vector<ScheduledKey> expected{
+      {100, EventPriority::MarketData, 10},
+      {200, EventPriority::MarketData, 20},
+      {200, EventPriority::NewOrder, 1},
+  };
+  REQUIRE(recording.keys == expected);
+  REQUIRE(source.prepared == std::vector<Sequence>({10, 20}));
+}
+
+TEST_CASE("Prepare failure joins exactly and a fresh runtime recovers",
+          "[Scheduler]") {
+  ThrowingPreparingSource source;
+  SchedulerRuntime failing(SchedulerRuntimeConfig{DateRange{}, 1, 1, 4});
+  auto run = std::async(std::launch::async, [&] {
+    try {
+      RecordingConsumer recording;
+      failing.run(source, recording);
+    } catch (const std::runtime_error &error) {
+      return std::string(error.what());
+    }
+    return std::string{"missing prepare failure"};
+  });
+
+  REQUIRE(run.wait_for(1s) == std::future_status::ready);
+  REQUIRE(run.get() == "exact prepare failure");
+
+  const std::array events{market(100, 1)};
+  SchedulerRuntime recovered(SchedulerRuntimeConfig{DateRange{}, 1, 1, 4});
+  RecordingConsumer recording;
+  recovered.run(events, recording);
+  REQUIRE(recording.keys.size() == 1);
+}
+
+TEST_CASE("Prepare hook cannot mutate market key or priority", "[Scheduler]") {
+  {
+    MutatingPreparingSource source{market(101, 1), false};
+    SchedulerRuntime runtime(SchedulerRuntimeConfig{DateRange{}, 1, 1, 4});
+    RecordingConsumer recording;
+    REQUIRE(throws_scheduler_error([&] { runtime.run(source, recording); }));
+  }
+  {
+    MutatingPreparingSource source{ScheduledEvent{new_order(100, 1)}, false};
+    SchedulerRuntime runtime(SchedulerRuntimeConfig{DateRange{}, 1, 1, 4});
+    RecordingConsumer recording;
+    REQUIRE(throws_scheduler_error([&] { runtime.run(source, recording); }));
+  }
 }
 
 TEST_CASE("Dispatcher does not publish the next event before acknowledgement",

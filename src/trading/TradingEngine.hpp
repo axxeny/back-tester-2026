@@ -6,11 +6,13 @@
 #include "trading/PositionKeeper.hpp"
 #include "trading/Strategy.hpp"
 
+#include <deque>
 #include <map>
 #include <set>
 #include <span>
 #include <stdexcept>
 #include <unordered_map>
+#include <utility>
 #include <vector>
 
 namespace cmf::trading {
@@ -104,6 +106,22 @@ private:
                    RejectReason reason, TimestampNs exchange_ts_ns);
   void reject_new(OwnOrder &order, RejectReason reason);
   void ensure_active_sink() const;
+  void drain_deferred_rejects();
+
+  template <typename Callback>
+  void invoke_strategy_callback(Callback &&callback) {
+    ++callback_depth_;
+    try {
+      std::forward<Callback>(callback)();
+    } catch (...) {
+      --callback_depth_;
+      throw;
+    }
+    --callback_depth_;
+    if (callback_depth_ == 0 && !draining_rejects_) {
+      drain_deferred_rejects();
+    }
+  }
 
   BacktestConfig config_;
   const market::HistoricalLOBStore &books_;
@@ -116,12 +134,15 @@ private:
   std::unordered_map<InstrumentId, std::set<ClOrdId>> open_order_ids_;
   std::unordered_map<ConsumptionKey, Quantity, ConsumptionHash> consumption_;
   std::vector<OrderQueryRow> query_buffer_;
+  std::deque<RejectView> deferred_rejects_;
   scheduler::CommandSink *active_commands_{};
   TimestampNs now_ns_{};
   Sequence next_command_sequence_{};
   ClOrdId next_client_order_id_{};
   Sequence next_fill_sequence_{};
   Sequence next_reject_sequence_{};
+  std::size_t callback_depth_{};
+  bool draining_rejects_{};
   bool has_time_{};
 };
 

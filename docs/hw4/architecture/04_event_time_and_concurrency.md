@@ -44,6 +44,15 @@ Do not depend on heap insertion order or thread timing.
 
 A raw MBO update may be one record in an exchange event group. The historical book applies all records required to reach a consistent state. A strategy book callback is published only at the agreed atomic boundary, such as `F_LAST`.
 
+A streaming source's `next()` stages one complete typed group and its immutable
+scheduled key, but does not mutate the historical book. After that market key
+wins chronological selection against pending commands, the dispatcher calls
+the source's optional `prepare_for_dispatch()` immediately before publication.
+Preparation applies the staged group and materializes trades and top-N views;
+it may not change the key or priority. Thus a command ordered before a
+prefetched market group sees the old book, while equal-time market data still
+wins by the standard priority rule.
+
 A `Trade` callback may be published in the same high-level engine event as a book update. The callback order is:
 
 1. re-evaluate resting own orders against the newly stable historical book;
@@ -54,6 +63,9 @@ A `Trade` callback may be published in the same high-level engine event as a boo
 6. publish `processed_seq`.
 
 This callback order is a project decision and must be covered by integration tests.
+Reject notifications caused by a command API call inside any strategy callback
+are queued FIFO and delivered only after that initiating callback unwinds; they
+must not recursively enter `on_reject()`.
 
 ## 4. Queue model
 
@@ -110,6 +122,10 @@ Under the strict barrier:
 3. trading thread reads the stable historical book;
 4. trading thread publishes `processed_seq` with release semantics;
 5. dispatcher observes it with acquire semantics before writing the book again.
+
+Non-owning trade/top-N buffers produced during preparation remain unchanged
+through publication and callback processing. They may be reused only when
+`next()` is called after the delivery's processed sequence is acknowledged.
 
 This ownership protocol can remove hot-path book mutexes for the mandatory one-engine version. Do not remove existing locks until tests and sanitizer runs demonstrate that all access follows this protocol. Multi-engine bonus mode requires waiting for every engine's ready sequence.
 

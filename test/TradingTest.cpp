@@ -4,9 +4,11 @@
 
 #include "MiniTest.hpp"
 
+#include <algorithm>
 #include <array>
 #include <limits>
 #include <stdexcept>
+#include <string>
 #include <vector>
 
 namespace {
@@ -302,17 +304,37 @@ TEST_CASE("Invalid orders and unknown cancels reject deterministically",
   HistoricalLOBStore books;
   struct InvalidStrategy final : RecordingStrategy {
     bool done{};
+    int callback_depth{};
+    int maximum_callback_depth{};
+    std::vector<std::string> callback_order;
+
     void on_book_update(const BookUpdateView &,
                         StrategyContext &context) override {
       if (!done) {
         done = true;
-        (void)context.submit_limit(2, Side::Buy, 100, 1);
+        ++callback_depth;
+        maximum_callback_depth =
+            std::max(maximum_callback_depth, callback_depth);
+        callback_order.push_back("book");
+        const ClOrdId terminal = context.submit_limit(2, Side::Buy, 100, 1);
         (void)context.submit_limit(1, Side::None, 100, 1);
         (void)context.submit_limit(1, static_cast<Side>(2), 100, 1);
         (void)context.submit_limit(1, Side::Buy, 101, 1);
         (void)context.submit_limit(1, Side::Buy, 100, 0);
         REQUIRE_FALSE(context.cancel_order(999));
+        REQUIRE_FALSE(context.cancel_order(terminal));
+        callback_order.push_back("book_done");
+        --callback_depth;
       }
+    }
+
+    void on_reject(const RejectView &reject,
+                   StrategyContext &context) override {
+      ++callback_depth;
+      maximum_callback_depth = std::max(maximum_callback_depth, callback_depth);
+      callback_order.push_back("reject");
+      RecordingStrategy::on_reject(reject, context);
+      --callback_depth;
     }
   } strategy;
   RecordingRecorder recorder;
@@ -325,13 +347,19 @@ TEST_CASE("Invalid orders and unknown cancels reject deterministically",
   SchedulerRuntime runtime(SchedulerRuntimeConfig{DateRange{}, 1, 8, 16});
   runtime.run(events, engine);
 
-  REQUIRE(strategy.rejects.size() == 6);
+  REQUIRE(strategy.rejects.size() == 7);
   REQUIRE(strategy.rejects[0].reason == RejectReason::UnknownInstrument);
   REQUIRE(strategy.rejects[1].reason == RejectReason::InvalidSide);
   REQUIRE(strategy.rejects[2].reason == RejectReason::InvalidSide);
   REQUIRE(strategy.rejects[3].reason == RejectReason::TickMisalignment);
   REQUIRE(strategy.rejects[4].reason == RejectReason::NonPositiveQuantity);
   REQUIRE(strategy.rejects[5].reason == RejectReason::UnknownOrder);
+  REQUIRE(strategy.rejects[6].reason == RejectReason::AlreadyTerminal);
+  REQUIRE(strategy.maximum_callback_depth == 1);
+  REQUIRE(strategy.callback_order ==
+          std::vector<std::string>({"book", "book_done", "reject", "reject",
+                                    "reject", "reject", "reject", "reject",
+                                    "reject"}));
 }
 
 TEST_CASE("Sell sweep respects limit and leaves only protected remainder",

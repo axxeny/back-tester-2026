@@ -264,55 +264,135 @@ def test_context_reject_and_cancel_are_non_recursive(tmp_path):
         [
             row(1, side="B", price="99", size=8, flags=0, order_id=10),
             row(2, side="A", price="101", size=4, order_id=11),
-            row(
-                3,
-                timestamp="1970-01-01T00:00:00.000000200Z",
-                action="T",
-                side="B",
-                price="100",
-                size=1,
-            ),
         ],
     )
 
     class Commands(bt.Strategy):
         def __init__(self):
             super().__init__()
-            self.order_id = None
             self.callback_depth = 0
             self.max_depth = 0
-            self.rejects = []
-            self.cancelled = False
+            self.events = []
 
         def on_book_update(self, update):
             self.callback_depth += 1
             self.max_depth = max(self.max_depth, self.callback_depth)
-            self.order_id = self.submit_limit(
-                update.instrument_id, bt.Side.BUY, 98_000_000_000, 2
-            )
-            self.submit_limit(999, bt.Side.BUY, 1, 1)
+            self.events.append(("book", update.sequence))
+            rejected_id = self.submit_limit(999, bt.Side.BUY, 1, 1)
+            assert not self.cancel_order(999)
+            assert not self.cancel_order(rejected_id)
+            self.events.append(("book_done", update.sequence))
             self.callback_depth -= 1
 
         def on_reject(self, reject):
             self.callback_depth += 1
             self.max_depth = max(self.max_depth, self.callback_depth)
-            self.rejects.append(reject.reason)
+            self.events.append(("reject", reject.reason))
             self.callback_depth -= 1
 
-        def on_trade(self, trade):
-            self.cancelled = self.cancel_order(self.order_id)
-
     strategy = Commands()
-    result = empty_strategy_run(
+    empty_strategy_run(
         path,
         strategy,
         config=bt.BacktestConfig(order_latency_ns=5, book_depth=1),
         instruments=metadata(1),
     )
-    assert strategy.rejects == [bt.RejectReason.UNKNOWN_INSTRUMENT]
-    assert strategy.max_depth == 2
-    assert strategy.cancelled
-    assert result.order_log_df["state"].tolist()[-1] == int(bt.OrderState.CANCELLED)
+    assert strategy.events == [
+        ("book", 2),
+        ("book_done", 2),
+        ("reject", bt.RejectReason.UNKNOWN_INSTRUMENT),
+        ("reject", bt.RejectReason.UNKNOWN_ORDER),
+        ("reject", bt.RejectReason.ALREADY_TERMINAL),
+    ]
+    assert strategy.max_depth == 1
+
+
+def test_same_strategy_concurrent_run_is_rejected_and_context_is_thread_local(
+    tmp_path,
+):
+    path = write_rows(
+        tmp_path,
+        [
+            row(1, side="B", price="99", size=8, flags=0, order_id=10),
+            row(2, side="A", price="101", size=4, order_id=11),
+        ],
+    )
+    entered = threading.Event()
+    release = threading.Event()
+
+    class Blocking(bt.Strategy):
+        def __init__(self):
+            super().__init__()
+            self.callbacks = 0
+
+        def on_book_update(self, update):
+            self.callbacks += 1
+            if self.callbacks == 1:
+                entered.set()
+                assert release.wait(timeout=5)
+
+    strategy = Blocking()
+    with pytest.raises(RuntimeError, match="only during a callback"):
+        _ = strategy.now_ns
+
+    failures = []
+
+    def first_run():
+        try:
+            empty_strategy_run(path, strategy, instruments=metadata(1))
+        except BaseException as error:
+            failures.append(error)
+
+    worker = threading.Thread(target=first_run)
+    worker.start()
+    assert entered.wait(timeout=2)
+    try:
+        with pytest.raises(RuntimeError, match="strategy is already running"):
+            empty_strategy_run(path, strategy, instruments=metadata(1))
+        with pytest.raises(RuntimeError, match="only during a callback"):
+            _ = strategy.now_ns
+    finally:
+        release.set()
+    worker.join(timeout=2)
+
+    assert not worker.is_alive()
+    assert failures == []
+    with pytest.raises(RuntimeError, match="only during a callback"):
+        _ = strategy.now_ns
+
+    empty_strategy_run(path, strategy, instruments=metadata(1))
+    assert strategy.callbacks == 2
+
+
+def test_nested_same_strategy_run_is_rejected_without_losing_context(tmp_path):
+    path = write_rows(
+        tmp_path,
+        [
+            row(1, side="B", price="99", size=8, flags=0, order_id=10),
+            row(2, side="A", price="101", size=4, order_id=11),
+        ],
+    )
+
+    class Nested(bt.Strategy):
+        def __init__(self):
+            super().__init__()
+            self.error = None
+            self.time_after_reject = None
+
+        def on_book_update(self, update):
+            try:
+                empty_strategy_run(path, self, instruments=metadata(1))
+            except RuntimeError as error:
+                self.error = str(error)
+            self.time_after_reject = self.now_ns
+
+    strategy = Nested()
+    empty_strategy_run(path, strategy, instruments=metadata(1))
+
+    assert strategy.error == "strategy is already running"
+    assert strategy.time_after_reject == 100
+    with pytest.raises(RuntimeError, match="only during a callback"):
+        _ = strategy.now_ns
 
 
 def test_delivery_callback_order_is_fills_then_trades_then_book(tmp_path):

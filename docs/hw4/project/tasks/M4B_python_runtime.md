@@ -44,9 +44,12 @@ merged. No stub may remain on the production path.
    metadata discovery pass for the three-argument fallback may collect only
    unique numeric instrument IDs and must not retain events. Explicit
    `instruments` is the one-pass path.
-2. Apply every record in an atomic `F_LAST` group to `HistoricalLOBStore`
-   before publishing one `MarketDelivery`. Keep its top-N/trade span storage
-   stable until acknowledgement.
+2. `next()` stages one complete atomic `F_LAST` group and its scheduled key
+   without mutating `HistoricalLOBStore`. Once that market event wins scheduler
+   selection, `prepare_for_dispatch()` applies the group and builds one
+   `MarketDelivery` immediately before publication. The key/priority are
+   immutable, and top-N/trade span storage remains stable until acknowledgement
+   and the following `next()` call.
 3. Delivery time is checked `exchange_ts + market_data_latency`. Source or
    virtual-time regression, malformed JSON, unterminated groups, and overflow
    fail fast.

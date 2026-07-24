@@ -122,7 +122,7 @@ RejectReason TradingEngine::validate_order(InstrumentId instrument_id,
 }
 
 void TradingEngine::ensure_active_sink() const {
-  if (active_commands_ == nullptr) {
+  if (active_commands_ == nullptr || callback_depth_ == 0) {
     throw TradingError("strategy command submitted outside an event callback");
   }
 }
@@ -251,10 +251,13 @@ void TradingEngine::process_market(const MarketDelivery &delivery) {
   }
   reevaluate(delivery.instrument_id, delivery.exchange_ts_ns);
   for (const auto &trade : delivery.trades) {
-    strategy_.on_trade(trade, *this);
+    invoke_strategy_callback(
+        [this, &trade] { strategy_.on_trade(trade, *this); });
   }
   if (delivery.book_update.has_value()) {
-    strategy_.on_book_update(*delivery.book_update, *this);
+    invoke_strategy_callback([this, &delivery] {
+      strategy_.on_book_update(*delivery.book_update, *this);
+    });
   }
 }
 
@@ -412,7 +415,7 @@ void TradingEngine::apply_fill(OwnOrder &order, PriceTicks price,
   if (order.query.remaining_quantity != 0) {
     insert_resting(order);
   }
-  strategy_.on_fill(fill, *this);
+  invoke_strategy_callback([this, &fill] { strategy_.on_fill(fill, *this); });
 }
 
 void TradingEngine::insert_resting(const OwnOrder &order) {
@@ -473,7 +476,31 @@ void TradingEngine::emit_reject(InstrumentId instrument_id,
                           reason,        exchange_ts_ns,
                           now_ns_,       ++next_reject_sequence_};
   recorder_.on_reject(reject);
-  strategy_.on_reject(reject, *this);
+  if (callback_depth_ != 0) {
+    deferred_rejects_.push_back(reject);
+    return;
+  }
+  invoke_strategy_callback(
+      [this, &reject] { strategy_.on_reject(reject, *this); });
+}
+
+void TradingEngine::drain_deferred_rejects() {
+  if (callback_depth_ != 0 || draining_rejects_) {
+    return;
+  }
+  draining_rejects_ = true;
+  try {
+    while (!deferred_rejects_.empty()) {
+      const RejectView reject = deferred_rejects_.front();
+      deferred_rejects_.pop_front();
+      invoke_strategy_callback(
+          [this, &reject] { strategy_.on_reject(reject, *this); });
+    }
+  } catch (...) {
+    draining_rejects_ = false;
+    throw;
+  }
+  draining_rejects_ = false;
 }
 
 void TradingEngine::reject_new(OwnOrder &order, RejectReason reason) {
