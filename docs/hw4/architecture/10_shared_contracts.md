@@ -103,6 +103,14 @@ with no owning strings or Python objects.
 either the start or end. A command arrival at the end timestamp may execute; an
 arrival strictly after the end timestamp does not execute.
 
+Complete atomic historical groups strictly before `start_ts_ns` are replayed
+into `HistoricalLOBStore` as warm-up. They do not reach the scheduler or
+strategy, do not match private orders, and do not create marks or commands.
+The top-N change cache is seeded from the warmed book, so a first in-range
+trade-only group does not produce a false book callback. A group exactly at
+`start_ts_ns` is delivered normally. Parsing, source ordering, and atomic-group
+validation remain fail-fast during warm-up.
+
 If a cancel arrives after its order has already reached terminal `Filled`
 state, it produces a reject with `RejectReason::AlreadyTerminal`. It is not a
 silent no-op.

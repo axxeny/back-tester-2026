@@ -25,6 +25,18 @@ template <typename Levels>
   return result;
 }
 
+template <typename Levels>
+void write_top_levels(const Levels &levels, std::size_t depth,
+                      std::vector<BookLevel> &output) {
+  output.clear();
+  for (const auto &[price, level] : levels) {
+    if (output.size() == depth) {
+      break;
+    }
+    output.push_back({price, level.quantity});
+  }
+}
+
 } // namespace
 
 Sequence LimitOrderBook::next_revision() {
@@ -271,6 +283,16 @@ LimitOrderBook::top_bids(std::size_t depth) const {
 std::vector<HistoricalBookLevel>
 LimitOrderBook::top_asks(std::size_t depth) const {
   return top_levels(asks_, depth);
+}
+
+void LimitOrderBook::write_top_bids(std::size_t depth,
+                                    std::vector<BookLevel> &output) const {
+  write_top_levels(bids_, depth, output);
+}
+
+void LimitOrderBook::write_top_asks(std::size_t depth,
+                                    std::vector<BookLevel> &output) const {
+  write_top_levels(asks_, depth, output);
 }
 
 std::optional<HistoricalBookLevel>

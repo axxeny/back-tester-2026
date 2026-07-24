@@ -91,6 +91,10 @@ public:
       }
 
       if (exchange_time < range_.start_ts_ns) {
+        for (const auto &event : group_) {
+          books_.apply(event);
+        }
+        seed_depth_cache(instrument_id);
         continue;
       }
       if (exchange_time > range_.end_ts_ns) {
@@ -148,21 +152,16 @@ public:
     if (book == nullptr) {
       throw std::logic_error("historical store lost applied instrument");
     }
-    for (const auto &level : book->top_bids(config_.book_depth)) {
-      bids_.push_back(BookLevel{level.price, level.quantity});
-    }
-    for (const auto &level : book->top_asks(config_.book_depth)) {
-      asks_.push_back(BookLevel{level.price, level.quantity});
-    }
+    book->write_top_bids(config_.book_depth, bids_);
+    book->write_top_asks(config_.book_depth, asks_);
 
-    auto [previous, inserted] =
-        previous_depth_.try_emplace(instrument_id, CachedDepth{});
-    (void)inserted;
-    const bool changed = !equal_levels(previous->second.bids, bids_) ||
-                         !equal_levels(previous->second.asks, asks_);
+    auto &previous = cached_depth(instrument_id);
+    const bool changed = !equal_levels(previous.bids, bids_) ||
+                         !equal_levels(previous.asks, asks_);
     std::optional<BookUpdateView> book_update;
     if (changed) {
-      previous->second = CachedDepth{bids_, asks_};
+      previous.bids.assign(bids_.begin(), bids_.end());
+      previous.asks.assign(asks_.begin(), asks_.end());
       book_update.emplace(BookUpdateView{
           instrument_id,
           staged->exchange_ts_ns,
@@ -186,6 +185,26 @@ public:
   }
 
 private:
+  CachedDepth &cached_depth(InstrumentId instrument_id) {
+    auto [iterator, inserted] =
+        previous_depth_.try_emplace(instrument_id, CachedDepth{});
+    if (inserted) {
+      iterator->second.bids.reserve(config_.book_depth);
+      iterator->second.asks.reserve(config_.book_depth);
+    }
+    return iterator->second;
+  }
+
+  void seed_depth_cache(InstrumentId instrument_id) {
+    const auto *book = books_.find(instrument_id);
+    if (book == nullptr) {
+      throw std::logic_error("historical store lost warmup instrument");
+    }
+    auto &cached = cached_depth(instrument_id);
+    book->write_top_bids(config_.book_depth, cached.bids);
+    book->write_top_asks(config_.book_depth, cached.asks);
+  }
+
   std::string path_;
   market::JsonlReader reader_;
   market::HistoricalLOBStore &books_;

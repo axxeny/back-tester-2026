@@ -160,6 +160,193 @@ TEST_CASE("Runtime suppresses empty depth until the first actual change",
   REQUIRE(strategy.book_sequences == std::vector<Sequence>({2}));
 }
 
+TEST_CASE("Runtime warms historical state before inclusive range start",
+          "[Runtime]") {
+  TempFile source("back-tester-runtime-range-warmup.jsonl");
+  {
+    std::ofstream output(source.getPath());
+    output
+        << R"({"ts_recv":"1970-01-01T00:00:00.000000100Z","hd":{"ts_event":"1970-01-01T00:00:00.000000100Z","instrument_id":1},"action":"A","side":"A","price":"102","size":3,"order_id":"10","flags":128,"sequence":1})"
+        << '\n'
+        << R"({"ts_recv":"1970-01-01T00:00:00.000000200Z","hd":{"ts_event":"1970-01-01T00:00:00.000000200Z","instrument_id":1},"action":"M","side":"A","price":"101","size":2,"order_id":"10","flags":128,"sequence":2})"
+        << '\n';
+  }
+
+  class Capture final : public trading::Strategy {
+  public:
+    void on_book_update(const BookUpdateView &view,
+                        trading::StrategyContext &) override {
+      sequences.push_back(view.sequence);
+      asks.assign(view.asks.begin(), view.asks.end());
+    }
+    std::vector<Sequence> sequences;
+    std::vector<BookLevel> asks;
+  } strategy;
+
+  (void)runtime::run_backtest(
+      strategy, source.getPath().string(), DateRange{200, 200},
+      BacktestConfig{0, 5, 1},
+      std::vector{InstrumentMeta{1, 1, 1'000'000'000, 1}});
+
+  REQUIRE(strategy.sequences == std::vector<Sequence>({2}));
+  REQUIRE(strategy.asks.size() == 1);
+  REQUIRE(strategy.asks[0].price == 101'000'000'000);
+  REQUIRE(strategy.asks[0].quantity == 2);
+}
+
+TEST_CASE("Range warmup supports in-range historical fill and cancel",
+          "[Runtime]") {
+  for (const char action : {'F', 'C'}) {
+    TempFile source(action == 'F' ? "back-tester-range-fill.jsonl"
+                                  : "back-tester-range-cancel.jsonl");
+    {
+      std::ofstream output(source.getPath());
+      output
+          << R"({"ts_recv":"1970-01-01T00:00:00.000000100Z","hd":{"ts_event":"1970-01-01T00:00:00.000000100Z","instrument_id":1},"action":"A","side":"A","price":"101","size":3,"order_id":"10","flags":128,"sequence":1})"
+          << '\n'
+          << "{\"ts_recv\":\"1970-01-01T00:00:00.000000200Z\","
+             "\"hd\":{\"ts_event\":\"1970-01-01T00:00:00.000000200Z\","
+             "\"instrument_id\":1},\"action\":\""
+          << action
+          << "\",\"side\":\"A\",\"price\":\"101\",\"size\":1,"
+             "\"order_id\":\"10\",\"flags\":128,\"sequence\":2}\n";
+    }
+
+    class Capture final : public trading::Strategy {
+    public:
+      void on_book_update(const BookUpdateView &view,
+                          trading::StrategyContext &) override {
+        asks.assign(view.asks.begin(), view.asks.end());
+      }
+      std::vector<BookLevel> asks;
+    } strategy;
+
+    (void)runtime::run_backtest(
+        strategy, source.getPath().string(), DateRange{200, 200},
+        BacktestConfig{0, 5, 1},
+        std::vector{InstrumentMeta{1, 1, 1'000'000'000, 1}});
+
+    if (action == 'F') {
+      REQUIRE(strategy.asks.size() == 1);
+      REQUIRE(strategy.asks[0].quantity == 2);
+    } else {
+      REQUIRE(strategy.asks.empty());
+    }
+  }
+}
+
+TEST_CASE("Clear immediately before start warms empty state; clear at start is "
+          "delivered",
+          "[Runtime]") {
+  for (const TimestampNs clear_time : {TimestampNs{199}, TimestampNs{200}}) {
+    TempFile source(clear_time == 199 ? "back-tester-range-clear-before.jsonl"
+                                      : "back-tester-range-clear-at.jsonl");
+    {
+      std::ofstream output(source.getPath());
+      output
+          << R"({"ts_recv":"1970-01-01T00:00:00.000000100Z","hd":{"ts_event":"1970-01-01T00:00:00.000000100Z","instrument_id":1},"action":"A","side":"B","price":"99","size":3,"order_id":"10","flags":128,"sequence":1})"
+          << '\n'
+          << "{\"ts_recv\":\"1970-01-01T00:00:00.000000"
+          << (clear_time == 199 ? "199" : "200")
+          << "Z\",\"hd\":{\"ts_event\":\"1970-01-01T00:00:00.000000"
+          << (clear_time == 199 ? "199" : "200")
+          << "Z\",\"instrument_id\":1},\"action\":\"R\",\"side\":\"N\","
+             "\"price\":\"0\",\"size\":0,\"flags\":128,\"sequence\":2}\n";
+      if (clear_time == 199) {
+        output
+            << R"({"ts_recv":"1970-01-01T00:00:00.000000200Z","hd":{"ts_event":"1970-01-01T00:00:00.000000200Z","instrument_id":1},"action":"T","side":"B","price":"99","size":1,"flags":128,"sequence":3})"
+            << '\n';
+      }
+    }
+
+    class Capture final : public trading::Strategy {
+    public:
+      void on_book_update(const BookUpdateView &view,
+                          trading::StrategyContext &) override {
+        ++books;
+        clear = view.is_snapshot;
+      }
+      void on_trade(const TradeView &, trading::StrategyContext &) override {
+        ++trades;
+      }
+      int books{};
+      int trades{};
+      bool clear{};
+    } strategy;
+
+    (void)runtime::run_backtest(
+        strategy, source.getPath().string(), DateRange{200, 200},
+        BacktestConfig{0, 5, 1},
+        std::vector{InstrumentMeta{1, 1, 1'000'000'000, 1}});
+
+    if (clear_time == 199) {
+      REQUIRE(strategy.books == 0);
+      REQUIRE(strategy.trades == 1);
+    } else {
+      REQUIRE(strategy.books == 1);
+      REQUIRE(strategy.trades == 0);
+      REQUIRE(strategy.clear);
+    }
+  }
+}
+
+TEST_CASE("Range warmup seeds depth cache and emits no callbacks or marks",
+          "[Runtime]") {
+  TempFile source("back-tester-runtime-range-cache.jsonl");
+  {
+    std::ofstream output(source.getPath());
+    output
+        << R"({"ts_recv":"1970-01-01T00:00:00.000000100Z","hd":{"ts_event":"1970-01-01T00:00:00.000000100Z","instrument_id":1},"action":"A","side":"B","price":"99","size":3,"order_id":"10","flags":128,"sequence":1})"
+        << '\n'
+        << R"({"ts_recv":"1970-01-01T00:00:00.000000200Z","hd":{"ts_event":"1970-01-01T00:00:00.000000200Z","instrument_id":1},"action":"T","side":"B","price":"99","size":1,"flags":128,"sequence":2})"
+        << '\n';
+  }
+
+  class Capture final : public trading::Strategy {
+  public:
+    void on_trade(const TradeView &, trading::StrategyContext &) override {
+      ++trades;
+    }
+    void on_book_update(const BookUpdateView &,
+                        trading::StrategyContext &) override {
+      ++books;
+    }
+    int trades{};
+    int books{};
+  } strategy;
+
+  const auto frozen = runtime::run_backtest(
+      strategy, source.getPath().string(), DateRange{200, 200},
+      BacktestConfig{0, 5, 1},
+      std::vector{InstrumentMeta{1, 1, 1'000'000'000, 1}});
+
+  REQUIRE(strategy.trades == 1);
+  REQUIRE(strategy.books == 0);
+  REQUIRE(frozen.pnl().empty());
+}
+
+TEST_CASE("Runtime validates unterminated groups before range start",
+          "[Runtime]") {
+  TempFile source("back-tester-runtime-range-unterminated.jsonl");
+  {
+    std::ofstream output(source.getPath());
+    output
+        << R"({"ts_recv":"1970-01-01T00:00:00.000000100Z","hd":{"ts_event":"1970-01-01T00:00:00.000000100Z","instrument_id":1},"action":"A","side":"B","price":"99","size":3,"order_id":"10","flags":0,"sequence":1})"
+        << '\n';
+  }
+  RuntimeStrategy strategy;
+  bool rejected = false;
+  try {
+    (void)runtime::run_backtest(
+        strategy, source.getPath().string(), DateRange{200, 300},
+        BacktestConfig{0, 5, 1},
+        std::vector{InstrumentMeta{1, 1, 1'000'000'000, 1}});
+  } catch (const market::SourceError &) {
+    rejected = true;
+  }
+  REQUIRE(rejected);
+}
+
 TEST_CASE("Runtime rejects an unterminated atomic source group", "[Runtime]") {
   TempFile source("back-tester-runtime-unterminated.jsonl");
   {

@@ -50,6 +50,8 @@ public:
   top_bids(std::size_t depth) const;
   [[nodiscard]] std::vector<HistoricalBookLevel>
   top_asks(std::size_t depth) const;
+  void write_top_bids(std::size_t depth, std::vector<BookLevel> &output) const;
+  void write_top_asks(std::size_t depth, std::vector<BookLevel> &output) const;
   [[nodiscard]] std::optional<HistoricalBookLevel>
   level(Side side, PriceTicks price) const;
   [[nodiscard]] std::optional<HistoricalOrderSlice>

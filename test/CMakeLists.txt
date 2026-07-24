@@ -8,7 +8,7 @@ add_executable(${TARGET}
     CoreMarketTest.cpp
     CoreContractsTest.cpp
     SchedulerTest.cpp
-    SimulatedLOBTest.cpp
+    TypedSimulatedLOBTest.cpp
     TradingTest.cpp
     ResultsTest.cpp
     RuntimeTest.cpp

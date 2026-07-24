@@ -18,6 +18,11 @@ Unsupported types are rejected with a typed reason rather than silently approxim
 
 Only `SimulatedLOB` decides whether a synthetic fill occurs. `OrderManager` owns lifecycle transitions but does not independently match. The scheduler decides when an order arrives but not whether it fills.
 
+In the implementation, typed `EngineView` owns private resting indexes and
+historical-consumption revisions. `SimulatedLOB` returns typed
+`SyntheticFill` decisions. `TradingEngine` neither scans historical liquidity
+nor decides fill price/quantity; it only applies those decisions in order.
+
 ## 3. Immediate matching algorithm
 
 ### Buy

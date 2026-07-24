@@ -1,8 +1,6 @@
 #include "trading/TradingEngine.hpp"
 
-#include <algorithm>
 #include <limits>
-#include <tuple>
 #include <utility>
 
 namespace cmf::trading {
@@ -17,44 +15,19 @@ namespace {
   return side == Side::Buy || side == Side::Sell;
 }
 
-[[nodiscard]] std::size_t mix(std::size_t seed, std::size_t value) noexcept {
-  return seed ^ (value + 0x9e3779b97f4a7c15ULL + (seed << 6U) + (seed >> 2U));
-}
-
 } // namespace
-
-bool TradingEngine::BuyFirst::operator()(
-    const RestingKey &left, const RestingKey &right) const noexcept {
-  return std::tuple{-left.price, left.arrival_sequence, left.client_order_id} <
-         std::tuple{-right.price, right.arrival_sequence,
-                    right.client_order_id};
-}
-
-bool TradingEngine::SellFirst::operator()(
-    const RestingKey &left, const RestingKey &right) const noexcept {
-  return std::tie(left.price, left.arrival_sequence, left.client_order_id) <
-         std::tie(right.price, right.arrival_sequence, right.client_order_id);
-}
-
-std::size_t TradingEngine::ConsumptionHash::operator()(
-    const ConsumptionKey &key) const noexcept {
-  std::size_t result = std::hash<InstrumentId>{}(key.instrument_id);
-  result = mix(result, std::hash<int>{}(static_cast<int>(key.historical_side)));
-  result = mix(result, std::hash<ExchangeOrderId>{}(key.exchange_order_id));
-  return mix(result, std::hash<Sequence>{}(key.liquidity_revision));
-}
 
 TradingEngine::TradingEngine(std::span<const InstrumentMeta> instruments,
                              BacktestConfig config,
                              const market::HistoricalLOBStore &books,
                              Strategy &strategy, Recorder &recorder)
-    : config_(config), books_(books), strategy_(strategy), recorder_(recorder) {
+    : config_(config), books_(books), strategy_(strategy), recorder_(recorder),
+      simulated_lob_(instruments) {
   if (config_.market_data_latency_ns < 0 || config_.order_latency_ns <= 0 ||
       config_.book_depth == 0) {
     throw std::invalid_argument("invalid backtest configuration");
   }
   instruments_.reserve(instruments.size());
-  resting_.reserve(instruments.size());
   open_order_ids_.reserve(instruments.size());
   for (const auto &meta : instruments) {
     positions_.register_instrument(meta);
@@ -64,7 +37,6 @@ TradingEngine::TradingEngine(std::span<const InstrumentMeta> instruments,
     if (!inserted) {
       throw std::invalid_argument("duplicate instrument metadata");
     }
-    resting_.try_emplace(meta.instrument_id);
     open_order_ids_.try_emplace(meta.instrument_id);
   }
   query_buffer_.reserve(32);
@@ -249,7 +221,11 @@ void TradingEngine::process_market(const MarketDelivery &delivery) {
   if (find_instrument(delivery.instrument_id) == nullptr) {
     throw TradingError("market delivery references unknown instrument");
   }
-  reevaluate(delivery.instrument_id, delivery.exchange_ts_ns);
+  const auto *book = books_.find(delivery.instrument_id);
+  if (book != nullptr) {
+    apply_fills(simulated_lob_.on_market(delivery.instrument_id, *book),
+                delivery.exchange_ts_ns);
+  }
   for (const auto &trade : delivery.trades) {
     invoke_strategy_callback(
         [this, &trade] { strategy_.on_trade(trade, *this); });
@@ -286,10 +262,12 @@ void TradingEngine::process_new(const NewOrderCommand &command) {
   order.query.exchange_arrival_sequence = command.command_sequence;
   order.query.state = OrderState::Open;
   emit_order_event(order, OrderLogEventType::Accepted);
-  insert_resting(order);
-  if (book != nullptr) {
-    reevaluate(command.instrument_id, command.scheduled_arrival_ts_ns);
-  }
+  apply_fills(simulated_lob_.accept(
+                  order.query.client_order_id, order.query.instrument_id,
+                  order.query.side, order.query.limit_price_ticks,
+                  order.query.remaining_quantity,
+                  order.query.exchange_arrival_sequence, book),
+              command.scheduled_arrival_ts_ns);
 }
 
 void TradingEngine::process_cancel(const CancelCommand &command) {
@@ -310,7 +288,7 @@ void TradingEngine::process_cancel(const CancelCommand &command) {
                 RejectReason::UnknownOrder, command.scheduled_arrival_ts_ns);
     return;
   }
-  erase_resting(order);
+  simulated_lob_.cancel(order.query.client_order_id);
   order.query.state = OrderState::Cancelled;
   order.cancel_requested = false;
   open_order_ids_.at(order.query.instrument_id)
@@ -318,71 +296,19 @@ void TradingEngine::process_cancel(const CancelCommand &command) {
   emit_order_event(order, OrderLogEventType::Cancelled);
 }
 
-void TradingEngine::reevaluate(InstrumentId instrument_id,
-                               TimestampNs exchange_ts_ns) {
-  const auto *book = books_.find(instrument_id);
-  if (book == nullptr) {
-    return;
-  }
-  auto orders = resting_.find(instrument_id);
-  if (orders == resting_.end()) {
-    return;
-  }
-
-  while (!orders->second.buys.empty()) {
-    const ClOrdId id = orders->second.buys.begin()->second;
-    auto own = orders_.find(id);
-    if (own == orders_.end()) {
-      throw TradingError("resting buy index is inconsistent");
-    }
-    const Quantity before = own->second.query.remaining_quantity;
-    match_order(own->second, *book, exchange_ts_ns);
-    if (own->second.query.remaining_quantity == before) {
-      break;
-    }
-  }
-  while (!orders->second.sells.empty()) {
-    const ClOrdId id = orders->second.sells.begin()->second;
-    auto own = orders_.find(id);
-    if (own == orders_.end()) {
-      throw TradingError("resting sell index is inconsistent");
-    }
-    const Quantity before = own->second.query.remaining_quantity;
-    match_order(own->second, *book, exchange_ts_ns);
-    if (own->second.query.remaining_quantity == before) {
-      break;
-    }
-  }
-}
-
-void TradingEngine::match_order(OwnOrder &order,
-                                const market::LimitOrderBook &book,
+void TradingEngine::apply_fills(std::span<const SyntheticFill> fills,
                                 TimestampNs exchange_ts_ns) {
-  book.for_each_marketable_liquidity(
-      order.query.side, order.query.limit_price_ticks,
-      [&](const market::HistoricalOrderSlice &slice) {
-        const ConsumptionKey key{order.query.instrument_id, slice.side,
-                                 slice.exchange_order_id,
-                                 slice.liquidity_revision};
-        const auto consumed = consumption_.find(key);
-        const Quantity consumed_quantity =
-            consumed == consumption_.end() ? 0 : consumed->second;
-        const Quantity available =
-            std::max<Quantity>(0, slice.remaining_quantity - consumed_quantity);
-        if (available == 0) {
-          return true;
-        }
-        const Quantity fill_quantity =
-            std::min(order.query.remaining_quantity, available);
-        consumption_[key] = consumed_quantity + fill_quantity;
-        apply_fill(order, slice.price, fill_quantity, exchange_ts_ns);
-        return order.query.remaining_quantity != 0;
-      });
+  for (const auto &fill : fills) {
+    const auto order = orders_.find(fill.client_order_id);
+    if (order == orders_.end()) {
+      throw TradingError("SimulatedLOB filled unknown private order");
+    }
+    apply_fill(order->second, fill.price, fill.quantity, exchange_ts_ns);
+  }
 }
 
 void TradingEngine::apply_fill(OwnOrder &order, PriceTicks price,
                                Quantity quantity, TimestampNs exchange_ts_ns) {
-  erase_resting(order);
   order.query.filled_quantity += quantity;
   order.query.remaining_quantity -= quantity;
   order.query.state = order.query.remaining_quantity == 0
@@ -412,40 +338,7 @@ void TradingEngine::apply_fill(OwnOrder &order, PriceTicks price,
       fill.exchange_ts_ns, fill.engine_ts_ns, fill.instrument_id,
       fill.client_order_id, fill.side, fill.price, fill.quantity,
       fill.remaining_quantity, LiquiditySource::HistoricalDisplayed});
-  if (order.query.remaining_quantity != 0) {
-    insert_resting(order);
-  }
   invoke_strategy_callback([this, &fill] { strategy_.on_fill(fill, *this); });
-}
-
-void TradingEngine::insert_resting(const OwnOrder &order) {
-  if (order.query.remaining_quantity == 0 || is_terminal(order.query.state)) {
-    return;
-  }
-  const RestingKey key{order.query.limit_price_ticks,
-                       order.query.exchange_arrival_sequence,
-                       order.query.client_order_id};
-  auto &instrument = resting_.at(order.query.instrument_id);
-  if (order.query.side == Side::Buy) {
-    instrument.buys.emplace(key, order.query.client_order_id);
-  } else {
-    instrument.sells.emplace(key, order.query.client_order_id);
-  }
-}
-
-void TradingEngine::erase_resting(const OwnOrder &order) {
-  if (order.query.exchange_arrival_sequence == 0) {
-    return;
-  }
-  const RestingKey key{order.query.limit_price_ticks,
-                       order.query.exchange_arrival_sequence,
-                       order.query.client_order_id};
-  auto &instrument = resting_.at(order.query.instrument_id);
-  if (order.query.side == Side::Buy) {
-    instrument.buys.erase(key);
-  } else if (order.query.side == Side::Sell) {
-    instrument.sells.erase(key);
-  }
 }
 
 void TradingEngine::emit_order_event(const OwnOrder &order,

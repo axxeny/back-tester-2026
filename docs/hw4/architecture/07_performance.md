@@ -21,6 +21,8 @@ Optimization order:
 - Do not call `std::stod`, parse JSON, format strings, or allocate Python objects in matching.
 - Do not take a full-book snapshot to match one order.
 - Extract only required top-N levels for callbacks.
+- Write top-N levels into caller-owned, pre-reserved buffers; do not return an
+  allocating temporary on the runtime callback path.
 - Use price-indexed structures to find marketable own orders.
 - Pre-reserve fill, transition, PnL, and command buffers.
 - Use bounded SPSC rings and an atomic ready sequence between the two mandatory threads.

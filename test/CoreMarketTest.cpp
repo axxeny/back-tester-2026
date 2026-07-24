@@ -7,6 +7,7 @@
 
 #include <fstream>
 #include <string>
+#include <vector>
 
 namespace {
 
@@ -468,6 +469,27 @@ TEST_CASE("Historical top-N is ordered, bounded and tracks level revisions",
   REQUIRE(book.book_revision() > before_clear);
   book.apply(event(MarketAction::Add, 7, Side::Buy, 100, 2));
   REQUIRE(book.level(Side::Buy, 100)->revision > before_clear);
+}
+
+TEST_CASE("Historical top-N writes reuse caller-owned reserved storage",
+          "[CoreMarket]") {
+  TypedLimitOrderBook book;
+  book.apply(event(MarketAction::Add, 1, Side::Buy, 100, 2));
+  book.apply(event(MarketAction::Add, 2, Side::Buy, 99, 3));
+  book.apply(event(MarketAction::Add, 3, Side::Sell, 101, 4));
+
+  std::vector<cmf::BookLevel> levels;
+  levels.reserve(2);
+  const auto *const storage = levels.data();
+  book.write_top_bids(2, levels);
+  REQUIRE(levels.size() == 2);
+  REQUIRE(levels[0].price == 100);
+  REQUIRE(levels[1].price == 99);
+  REQUIRE(levels.data() == storage);
+  book.write_top_asks(2, levels);
+  REQUIRE(levels.size() == 1);
+  REQUIRE(levels[0].price == 101);
+  REQUIRE(levels.data() == storage);
 }
 
 TEST_CASE("HistoricalLOBStore isolates instruments", "[CoreMarket]") {

@@ -4,7 +4,6 @@ add_library(${TARGET} STATIC
     DataIngestionLayer.cpp
     MarketDataEvent.cpp
     LimitOrderBook.cpp
-    SimulatedLOB.cpp
     LobRouter.cpp
 )
 

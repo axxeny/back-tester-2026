@@ -53,6 +53,11 @@ These are implementation decisions selected because the source assignment is amb
 ### D1. Single fill authority
 
 `SimulatedLOB` is the only component that creates synthetic fills. For HW4, the big-picture Gateway Server and Slippage Simulator are represented by an in-process order-command queue and chronological scheduler, not separate services.
+The production implementation is the typed `src/trading/SimulatedLOB` with
+its owned `EngineView`; `TradingEngine` applies its decisions to lifecycle,
+positions, results, and callbacks. The older `src/main/SimulatedLOB` is not
+part of the build; its independent matcher and test were removed when the
+typed production authority was connected.
 
 ### D2. Deterministic single virtual timeline
 
