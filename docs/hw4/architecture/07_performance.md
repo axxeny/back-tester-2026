@@ -1,98 +1,77 @@
 # Performance design and benchmarks
 
-## 1. Performance posture
+## Hot-path design
 
-This is an HFT-school project, so the hot path should demonstrate correct low-latency engineering choices. It is not necessary to build a lock-free framework or hand-tune every cache line before correctness is established.
+The implementation gives deterministic correctness priority over raw latency,
+then removes avoidable allocation and conversion from the event path.
 
-Optimization order:
+- JSON strings, ISO timestamps, and decimal prices are parsed once by
+  `JsonlReader`.
+- Timestamps, price ticks, quantities, IDs, and sequences remain integer native
+  values.
+- The reader streams physical rows and stages one atomic group; it does not
+  load and sort the full file.
+- Historical matching traverses only marketable L3 slices and stops outside the
+  strategy limit.
+- Resting private orders use price-time ordered maps.
+- Top-N callback vectors and source-group buffers are reserved and reused.
+- Result data is appended to typed, pre-reserved columns.
+- Event and command communication uses bounded SPSC rings.
+- The shared book uses single-writer ownership plus the ready barrier instead
+  of a per-update mutex.
+- The GIL is held only for Python interaction.
+- DataFrames are materialized once, after the native run.
 
-1. remove avoidable algorithmic work and allocation;
-2. use typed contiguous data;
-3. establish ownership and deterministic synchronization;
-4. measure Release builds;
-5. optimize measured bottlenecks only.
+The historical L3 price indexes and private order indexes use standard-library
+ordered containers. Custom allocators, SIMD, and custom trees are intentionally
+absent because the measured course-project workload does not justify their
+complexity.
 
-## 2. Mandatory hot-path rules
+## Ready-signal round-trip benchmark
 
-- Parse ISO timestamps and decimal prices once at ingestion.
-- Store timestamps as `int64` nanoseconds.
-- Store price as integer ticks and quantity as integer.
-- Use numeric IDs and typed enums.
-- Do not call `std::stod`, parse JSON, format strings, or allocate Python objects in matching.
-- Do not take a full-book snapshot to match one order.
-- Extract only required top-N levels for callbacks.
-- Write top-N levels into caller-owned, pre-reserved buffers; do not return an
-  allocating temporary on the runtime callback path.
-- Use price-indexed structures to find marketable own orders.
-- Pre-reserve fill, transition, PnL, and command buffers.
-- Use bounded SPSC rings and an atomic ready sequence between the two mandatory threads.
-- Avoid `std::function`, shared-pointer copies, and virtual dispatch inside per-level matching loops.
-- Acquire the GIL only for the Python callback window.
-- Do not log per event in benchmark or normal hot loops.
+Executable:
 
-## 3. Practical data-structure guidance
-
-The current `std::map`-based L3 book is acceptable for the first finished submission. Replacing it with a custom flat tree is not on the critical path.
-
-Worth fixing now:
-
-- full-book `snapshot(0)` on every order;
-- strings and doubles in engine-facing event types;
-- repeated hash/map lookups that can be cached during one match;
-- unbounded vectors without reservation;
-- unnecessary cross-thread locks under the strict barrier.
-
-Not worth doing before integration:
-
-- custom allocators everywhere;
-- intrusive containers;
-- manual SIMD;
-- broad small-vector rewrites;
-- spin loops without measured benefit.
-
-## 4. Required ready-signal benchmark
-
-Measure a warmed-up round trip:
-
-```text
-dispatcher publishes synthetic event
-    → trading thread consumes and performs no-op reaction
-    → trading thread stores processed_seq
-    → dispatcher observes completion
+```bash
+build-release/bin/test/back-tester-scheduler-benchmark
 ```
 
-Report:
+The measured interval is:
 
-- build type and compiler;
-- CPU/OS summary when available;
-- ring capacity and waiting strategy;
-- warm-up iterations;
-- measured iterations;
-- p50, p95, p99, minimum, and mean nanoseconds.
+```text
+dispatcher publishes a synthetic event
+  -> trading thread consumes and performs a no-op reaction
+  -> trading thread publishes processed_seq
+  -> dispatcher observes acknowledgement
+```
 
-Do not invent a universal pass threshold. The baseline is for regression detection and comparison of implementations on the same machine.
+The benchmark performs warm-up iterations and 100,000 measured iterations. It
+reports build type, compiler, OS/CPU when available, ring capacity, waiting
+strategy, minimum, mean, p50, p95, and p99 nanoseconds.
 
-## 5. Required Python callback benchmark
+## Python callback benchmark
 
-Measure 1,000 invocations per sample for:
+Command:
 
-- no-op `on_book_update()` with top-of-book payload;
-- no-op `on_book_update()` with top-15 payload;
-- optionally no-op `on_fill()`.
+```bash
+uv run python python/benchmarks/callback_overhead.py
+```
 
-Report native loop overhead separately if possible. Warm up Python and the binding path before timing. The benchmark must not include JSON parsing, DataFrame construction, console output, or process startup.
+It measures 20 warmed samples of exactly 1,000 no-op `on_book_update()`
+callbacks for top-1 and top-15 payloads. Payload construction, JSON parsing,
+process startup, logging, and DataFrame construction are outside the timed
+region.
 
-## 6. Regression policy
+The totals are unadjusted. A side-effect-free native empty loop is not
+subtracted because an optimizing Release compiler can eliminate it.
 
-A change that degrades a relevant benchmark by more than 20% on the same machine/build requires an explanation or optimization follow-up, unless it fixes correctness. Correctness wins over benchmark numbers, but regressions must be visible.
+## Interpreting results
 
-## 7. Profiling checkpoint
+Benchmark values are machine-specific observations for regression comparison,
+not universal latency pass thresholds. Compare results only with the same
+compiler, build type, host, and benchmark configuration. Correctness fixes take
+precedence over speed; a material same-machine regression still requires an
+explanation.
 
-Profile only after the first end-to-end run. Candidate counters:
-
-- events per second;
-- allocations per million market events;
-- callback count after top-N filtering;
-- number of full-book copies — target zero in matching;
-- average own orders scanned per book update;
-- result-buffer reallocations — target zero after warm-up/reserve estimate.
+Useful profiling counters are events per second, allocations per million
+events, callbacks after top-N filtering, private orders scanned per update, and
+result-buffer reallocations.

@@ -8,8 +8,9 @@ The dependency-free native contract is declared once under `src/core/`.
 aliases old names to the core definitions and does not redeclare `Side`,
 `Quantity`, `ClOrdId`, or the other public numeric types.
 
-Legacy LOB structures continue to store source prices as `double` until their
-owned migration tasks. New event-loop contracts use integer `PriceTicks`.
+The compatibility LOB under `src/main` retains its earlier representation.
+The implemented streaming runtime and every public event-loop contract use
+integer `PriceTicks`.
 
 ## 2. Price and monetary units
 
@@ -118,7 +119,7 @@ silent no-op.
 ## 6. Results boundary
 
 `FillResultRow`, `OrderLogResultRow`, and `PnlPoint` declare the native values
-and exact enum storage used by the result schemas. Buffer allocation,
-ownership, NumPy/Arrow lifetime retention, and zero-copy conversion are M4
-implementation concerns. M1 creates no Python objects and makes no zero-copy
-claim.
+and exact enum storage used by the result schemas. `ResultRecorder` stores each
+field in a typed column. `FrozenResults` owns immutable shared storage, and the
+Python binding attaches that owner to every zero-copy NumPy view before
+constructing pandas objects in bulk.

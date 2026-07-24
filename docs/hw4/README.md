@@ -1,41 +1,31 @@
-# Back-tester HW4: architecture and agent execution pack
+# Homework 4 documentation
 
-Этот каталог превращает размытое задание Homework 4 и текущее состояние репозитория в рабочий набор архитектурных решений, quality gates и готовых промтов для команды агентов.
+This directory contains the final documentation for the deterministic options
+backtesting engine delivered for Homework 4.
 
-Технические документы и промты написаны на английском: так меньше неоднозначности в именах типов, API и критериях приёмки. Этот README служит русскоязычной навигацией.
+## Start here
 
-## Что внутри
+- [`GETTING_STARTED.md`](GETTING_STARTED.md) is the practical onboarding guide
+  for installation, configuration, strategy development, input data, testing,
+  and troubleshooting.
+- [`architecture/README.md`](architecture/README.md) explains the implemented
+  architecture, runtime flow, module boundaries, matching, concurrency, Python
+  API, results, performance, and verification.
+- [`architecture/11_requirements_traceability.md`](architecture/11_requirements_traceability.md)
+  maps the written assignment and original diagram to concrete code and tests.
+- [`source/01_homework_4_assignment.md`](source/01_homework_4_assignment.md) is
+  the normalized assignment text.
+- [`source/02_original_big_picture_mermaid.md`](source/02_original_big_picture_mermaid.md)
+  is the Mermaid transcription of the original big-picture diagram.
+- [`../../README.md`](../../README.md) contains installation, build, test,
+  example, CLI, and benchmark commands.
 
-| Каталог | Назначение |
-|---|---|
-| [`source`](source/) | Нормализованный текст исходного задания и Mermaid-версия исходной диаграммы. Это источник требований, но не окончательная архитектура. |
-| [`architecture`](architecture/) | Принятая целевая архитектура, контракты времени, matching, Python API, производительность, гэпы репозитория и тестовая стратегия. |
-| [`project`](project/) | План выполнения, зависимости, quality gates, decision log, status board, трассировка требований и шаблоны передачи работы. |
-| [`prompts`](prompts/) | Готовые промты для Team Lead, специализированных разработчиков, независимого QA, независимого reviewer и bug-fix агента. |
-| [`../../AGENTS.md`](../../AGENTS.md) | Общие обязательные правила для любого агента, работающего в репозитории. |
+The removed development plans, task briefs, handoff templates, status boards,
+and agent prompts were implementation-process artifacts. They are not part of
+the final system documentation.
 
-## Как использовать
+## Documentation rule
 
-1. Скопировать этот каталог в репозиторий, например как `docs/hw4/`, либо положить `../../AGENTS.md` в корень, а остальные файлы — в `docs/hw4/`.
-2. Запустить Team Lead с [`prompts/00_teamlead_orchestrator.md`](prompts/00_teamlead_orchestrator.md).
-3. Team Lead проверяет baseline, обновляет [`project/04_status_board.md`](project/04_status_board.md), нарезает задачи по шаблону и делегирует их специализированным dev-агентам.
-4. Каждый implementation task проходит независимые QA и review. Разработчик не подтверждает собственную работу.
-5. Архитектурные изменения сначала фиксируются в [`project/03_decision_log.md`](project/03_decision_log.md), затем реализуются.
-
-Полная проверка покрытия исходного текста и блоков исходной диаграммы находится
-в [`project/07_requirements_traceability.md`](project/07_requirements_traceability.md).
-
-## Приоритет источников истины
-
-При конфликте использовать следующий порядок:
-
-1. исходное задание в [`source/01_homework_4_assignment.md`](source/01_homework_4_assignment.md);
-2. явно принятые решения в [`architecture/01_scope_and_decisions.md`](architecture/01_scope_and_decisions.md) и decision log;
-3. текущий код и тесты репозитория;
-4. локальный task brief Team Lead.
-
-Архитектура содержит несколько прагматичных решений, которых нет в PDF. Они нужны, чтобы закончить проект в срок, и помечены как project decisions, а не как факты из задания.
-
-## Рекомендуемый первый запуск
-
-Team Lead должен начать не с параллельной разработки движка, а с Milestone M0: восстановить воспроизводимый build/test/package baseline. Только после зелёной базы безопасно параллелить `core/market`, `scheduler` и Python stub work.
+Architecture pages describe the current implementation, not a proposed design.
+When behavior changes, update the relevant architecture page, traceability row,
+and executable tests in the same change.

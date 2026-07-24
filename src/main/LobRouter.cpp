@@ -5,7 +5,7 @@
 LobRouter::LobRouter(std::size_t interval) : snapshotInterval_(interval) {}
 
 void LobRouter::route(const MarketDataEvent &event) {
-  // Запомнить символ при первом появлении инструмента
+  // Retain the first symbol observed for each instrument.
   if (!event.symbol.empty())
     symbols_.emplace(event.instrumentId, event.symbol);
 
@@ -13,14 +13,12 @@ void LobRouter::route(const MarketDataEvent &event) {
   if (!lob)
     lob = std::make_shared<LimitOrderBook>();
 
-  lob->applyEvent(event); // Обновление исторического basement-стакана
+  lob->applyEvent(event); // Update the historical book.
   ++totalEventsRouted_;
 
-  // Печатать промежуточный snapshot если:
-  // - задан интервал,
-  // - пришло время по счётчику,
-  // - и текущее событие — последнее в атомарной группе (F_LAST),
-  //   чтобы не показывать стакан в промежуточном состоянии.
+  // Print an intermediate snapshot only when an interval is configured, the
+  // event counter reaches it, and this is the F_LAST record of an atomic group.
+  // This prevents observation of an intermediate book state.
   if (snapshotInterval_ > 0 &&
       totalEventsRouted_ - lastSnapshotAt_ >= snapshotInterval_ &&
       event.isLastInEvent()) {

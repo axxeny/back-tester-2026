@@ -2,7 +2,7 @@
 
 ## 1. Supported order surface
 
-The first version supports:
+The runtime supports:
 
 - limit orders only;
 - Good-Till-Cancel behavior;
@@ -12,7 +12,8 @@ The first version supports:
 - one instrument per order;
 - partial fills.
 
-Unsupported types are rejected with a typed reason rather than silently approximated.
+Unsupported types are rejected with a typed reason rather than silently
+approximated.
 
 ## 2. Single fill authority
 
@@ -142,7 +143,8 @@ stateDiagram-v2
 - Position and filled quantity are updated before `on_fill()`.
 - Cancel submission changes eligible states to `PendingCancel` immediately.
 - If fills occur before cancel arrival, they are applied normally.
-- A cancel arrival after a full fill is recorded as a cancel reject or no-op according to one documented rule; the recommended rule is a typed reject for observability.
+- A cancel arrival after a full fill emits
+  `RejectReason::AlreadyTerminal`.
 - Every externally visible transition creates one order-log row.
 
 ## 10. Position semantics

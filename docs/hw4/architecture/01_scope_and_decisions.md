@@ -1,154 +1,139 @@
-# Scope and frozen decisions
+# System scope and implemented behavior
 
-## 1. Goal
+## Purpose
 
-Build a deterministic, in-process options backtesting engine suitable for an HFT school assignment. It must be meaningfully performance-conscious and correctly model event ordering, private orders, fills, state, Python callbacks, and results without turning into a production exchange platform.
+This project is a deterministic, in-process options backtesting engine built
+for an HFT course assignment. It demonstrates typed market-data ingestion,
+historical book reconstruction, causal order scheduling, private order
+matching, Python strategy callbacks, position/PnL accounting, and bulk result
+delivery.
 
-## 2. Required source behavior
+It is a backtester, not an exchange emulator or a complete options risk system.
 
-The source assignment requires:
-
-- a market-data consumer receiving `BookUpdate`, `BookSnapshot`, and `Trade` messages;
-- virtual engine time with fixed market-data latency;
-- an atomic `processed_seq` ready barrier;
-- `HistoricalLOB + EngineView = SimulatedLOB`;
-- fill-at-touch and fixed order latency;
-- an Order Manager / Position Keeper;
-- Python strategy callbacks through pybind11 with correct GIL handling;
-- editable packaging through one tool and `scikit-build-core`;
-- `Result` with PnL, fills, and order log using bulk NumPy/Arrow hand-off;
-- synthetic tests, an end-to-end Python strategy, and two benchmarks.
-
-## 3. In scope for the first complete HW4 version
+## Implemented runtime
 
 - One OS process.
-- One Backtest Engine thread and one Trading Engine thread.
-- One mandatory `EngineView`; multi-engine remains a compatible extension point.
-- Multiple instruments, with `instrument_id` in every event, order, callback, position, and result row.
-- Databento-like MBO JSONL ingestion first.
-- Fixed market-data latency and fixed order latency, both configurable.
+- One dispatcher thread and one trading-engine consumer thread.
+- Multiple instruments in one replay.
+- Databento-like MBO JSONL input.
+- Streaming, fail-fast parsing into numeric native types.
+- A per-instrument historical L3 book.
+- One private `EngineView` owned by the typed `SimulatedLOB`.
+- Fixed market-data latency and strictly positive fixed order latency.
 - Limit GTC orders, partial fills, resting orders, and cancel.
-- Top-N strategy book callbacks, configurable, default depth 15.
-- Full internal L3 replay even when Python receives filtered top-N callbacks.
-- A deterministic fill-at-touch model that consumes displayed historical depth up to the limit.
-- Per-instrument positions and contract multipliers.
-- Bulk result buffers and pandas-facing views.
-- Reproducible unit, integration, QA, and benchmark commands.
+- Top-N Python book callbacks; default depth is 15.
+- Full L3 replay even though Python receives an aggregated top-N view.
+- Fill-at-touch matching across displayed historical depth up to the limit.
+- Per-instrument positions, contract multipliers, FIFO realized PnL, and
+  midpoint marking.
+- Native columnar result buffers exposed as pandas DataFrames and a Series.
+- Native, Python, end-to-end, determinism, sanitizer, and benchmark coverage.
 
-## 4. Explicitly out of scope
+Every strategy-facing event, order, position, and result row carries a numeric
+`instrument_id`.
 
-- Network sockets, IPC, or multiple OS processes.
-- A production exchange gateway protocol.
-- Queue-position or probabilistic passive fill modeling.
-- Market impact on the source historical replay.
-- Jitter, stochastic latency, or stochastic slippage.
-- Replace/amend, stop, peg, post-only, FOK, IOC, or multi-leg orders.
-- Exercise, assignment, expiration settlement, Greeks, or a full options risk engine.
-- A generic plugin architecture, dependency injection framework, persistence/database layer, distributed telemetry, or UI.
+## Core behavioral rules
 
-## 5. Frozen project decisions
+### One fill authority
 
-These are implementation decisions selected because the source assignment is ambiguous. They are authoritative until changed through the decision log.
+`trading::SimulatedLOB` is the only component that creates synthetic fills.
+The scheduler determines when a command arrives; the historical book provides
+displayed liquidity; `TradingEngine` applies the resulting fill decisions to
+order lifecycle, positions, results, and callbacks without independently
+matching.
 
-### D1. Single fill authority
+### One deterministic virtual timeline
 
-`SimulatedLOB` is the only component that creates synthetic fills. For HW4, the big-picture Gateway Server and Slippage Simulator are represented by an in-process order-command queue and chronological scheduler, not separate services.
-The production implementation is the typed `src/trading/SimulatedLOB` with
-its owned `EngineView`; `TradingEngine` applies its decisions to lifecycle,
-positions, results, and callbacks. The older `src/main/SimulatedLOB` is not
-part of the build; its independent matcher and test were removed when the
-typed production authority was connected.
+```text
+market delivery = exchange timestamp + market-data latency
+order arrival   = callback-visible engine time + order latency
+cancel arrival  = callback-visible engine time + order latency
+```
 
-### D2. Deterministic single virtual timeline
+At the same scheduled timestamp, priority is:
 
-- Historical market delivery time: `exchange_ts_ns + market_data_latency_ns`.
-- Order arrival time: `submit_engine_ts_ns + order_latency_ns`.
-- Cancel arrival time: `cancel_submit_engine_ts_ns + order_latency_ns`.
+1. market delivery;
+2. new-order arrival;
+3. cancel arrival.
 
-The dispatcher merges these scheduled events. This is a deliberate homework-compatible simplification, not a claim of full exchange/observer causality under independent market-data delay.
+Source or command sequence is the stable tie-breaker within one class.
 
-### D3. Same-timestamp priority
+### Strict market-data barrier
 
-At equal scheduled time:
+The dispatcher publishes one scheduled event with a monotonically increasing
+`dispatch_seq`. It does not mutate shared market state for the next event until
+the trading thread publishes `processed_seq >= dispatch_seq`.
 
-1. historical market events;
-2. new-order arrivals;
-3. cancel arrivals.
+The acknowledgement occurs after matching, state updates, result recording,
+Python callbacks, and command enqueue for the current event.
 
-Within a class, source sequence or command sequence is the stable tie-breaker.
+### Callback contract
 
-### D4. Strict ready barrier
+Python strategies receive:
 
-The dispatcher assigns a monotonically increasing `dispatch_seq`, publishes one high-level engine event, and waits until `processed_seq >= dispatch_seq` before mutating shared market state for the next event. Prefetching into a queue is allowed; consuming the next event is not.
+- `on_book_update(BookUpdate)`;
+- `on_trade(Trade)`;
+- `on_fill(Fill)`;
+- `on_reject(Reject)`.
 
-### D5. Callback contract
+A book callback is emitted after a complete atomic source group and only when
+the configured top-N view changes. For a market delivery, the observable order
+is:
 
-Python receives:
+1. resting-order matching and fill callbacks;
+2. trade callbacks in source order;
+3. one book callback when top-N changed.
 
-- `on_book_update(BookUpdateView)`;
-- `on_trade(TradeView)`;
-- `on_fill(FillView)`;
-- `on_reject(RejectView)`.
+State, position, PnL inputs, and result rows are updated before `on_fill()` or
+`on_reject()` runs.
 
-Every payload includes `instrument_id`, exchange time, engine time, and a deterministic sequence.
+### Non-recursive strategy commands
 
-### D6. Book callback granularity
+An order or cancel submitted from a callback enters the command ring with a
+future scheduled arrival. It is never matched recursively on the callback's
+C++ stack. Immediate validation rejects are deferred until the initiating
+callback unwinds.
 
-A book callback fires after an atomic historical group is complete, such as Databento `F_LAST`, and only if the configured top-N view changed. Default N is 15. A smoke test may use N=1. Internal replay remains full L3.
+### Private historical consumption
 
-### D7. Order lifecycle
+A synthetic fill never mutates the source historical book. `SimulatedLOB`'s
+`EngineView` records private consumption by instrument, historical side,
+exchange order ID, and liquidity revision. Replaced liquidity at the same price
+therefore becomes available without inheriting stale private depletion.
 
-The required states are:
+### Failure policy
 
-`PendingNew`, `Open`, `PartiallyFilled`, `Filled`, `PendingCancel`, `Cancelled`, `Rejected`.
+Malformed input, chronology regressions, invalid configuration, native
+exceptions, and Python callback exceptions fail the run. The runtime records
+the first exception, requests stop, closes/wakes queues and barriers, joins both
+threads, and rethrows to the caller. It does not silently continue with a
+corrupted replay.
 
-Replace is not implemented.
+## Supported order lifecycle
 
-### D8. Numeric core types
+```text
+PendingNew
+  -> Open | PartiallyFilled | Filled | Rejected
+Open
+  -> PartiallyFilled | Filled | PendingCancel
+PartiallyFilled
+  -> PartiallyFilled | Filled | PendingCancel
+PendingCancel
+  -> PartiallyFilled | Filled | Cancelled
+```
 
-- nanosecond timestamps: signed 64-bit integer;
-- price: fixed-point integer ticks;
-- quantity: integer;
-- instrument/order IDs: numeric;
-- sides and states: strongly typed enums.
+Terminal states are `Filled`, `Cancelled`, and `Rejected`.
 
-Strings and floating-point parsing stay in ingestion or Python boundary code.
+## Explicit limitations
 
-### D9. Fill model
-
-Own limit orders match opposite historical displayed liquidity price-by-price up to the limit. Partial fills and multi-level sweeps are supported. Own orders at the same price are FIFO by exchange-arrival sequence. Historical queue position is not modeled.
-
-### D10. Private historical consumption
-
-A synthetic fill does not mutate the shared `HistoricalLOB`. It records consumption in that engine's private overlay. Consumption is keyed by side, price, and historical level revision so new liquidity at the same price is not permanently hidden.
-
-### D11. State before callback
-
-Order state, position, cash/PnL inputs, and result buffers are updated before `on_fill()` or `on_reject()` is called.
-
-### D12. Non-recursive command processing
-
-Orders or cancels submitted inside a callback are enqueued as future scheduler commands. They are never recursively matched inside the same C++ stack frame.
-
-### D13. Python exception policy
-
-A Python exception:
-
-1. is captured;
-2. requests engine stop;
-3. unblocks any ready/barrier wait;
-4. joins threads;
-5. is rethrown to the caller of `backtest.run()`.
-
-### D14. Result hand-off
-
-C++ accumulates typed columnar buffers. Python objects are created once after the run. Zero-copy NumPy/Arrow views are used where ownership and dtype permit; per-row Python append is forbidden.
-
-## 6. Decision-change rule
-
-A change to public callbacks, event priority, state transitions, result columns, or numeric core types requires:
-
-1. a decision-log entry;
-2. updated architecture docs;
-3. migration of all dependent tests and stubs in the same change set;
-4. explicit Team Lead approval before implementation branches rebase on it.
+- No sockets, IPC, multiple processes, or distributed services.
+- No historical queue-position model, probabilistic fills, or market impact.
+- No stochastic latency, jitter, or slippage.
+- No replace/amend, market, stop, peg, post-only, IOC, FOK, or multi-leg
+  orders.
+- No self-matching between private strategy orders.
+- No exercise, assignment, expiration settlement, Greeks, volatility surface,
+  or complete options risk engine.
+- No Feather input, database, persistence layer, UI, or generic plugin system.
+- The shipped runtime has one trading `EngineView`; isolation between typed
+  `SimulatedLOB` instances is tested but is not exposed by `backtest.run()`.

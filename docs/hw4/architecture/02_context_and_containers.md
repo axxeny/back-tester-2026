@@ -1,159 +1,170 @@
-# Context, containers, and runtime shape
+# Runtime architecture and data flow
 
-## 1. System context
+## System context
 
 ```mermaid
 flowchart LR
-    USER["Python user / strategy"]
-    DATA[("Databento JSONL data")]
-    API["backtest.run + Strategy API"]
-    NATIVE["Native C++ backtest engine"]
-    RESULT["Result: PnL, fills, order log"]
+    USER["Python strategy"]
+    DATA["Databento-like MBO JSONL"]
+    API["backtest.run"]
+    NATIVE["Native C++ runtime"]
+    RESULT["Result<br/>fills, order log, PnL"]
 
-    USER --> API --> NATIVE
+    USER --> API
     DATA --> NATIVE
+    API --> NATIVE
     NATIVE --> RESULT --> USER
 ```
 
-## 2. Process and thread model
+`backtest.run()` is the public entry point. It accepts a Strategy instance,
+input path, date range, optional configuration, and optional instrument
+metadata. When metadata is omitted, the binding performs one discovery pass to
+find numeric instrument IDs and then runs the streaming replay with Databento
+nanounit price scaling.
+
+## Process and thread model
 
 ```mermaid
 flowchart TB
-    subgraph PY["Python layer"]
-        RUN["backtest.run"]
-        STRAT["Python Strategy subclass"]
-        PANDAS["Result pandas views"]
+    subgraph CALLER["Python caller thread"]
+        RUN["pybind11 run()"]
+        ADAPTER["PythonStrategyAdapter"]
+        PYRESULT["Python Result wrapper"]
     end
 
-    subgraph CPP["Single C++ process"]
-        subgraph BT["Backtest Engine thread"]
-            READER["JSONL reader / source iterators"]
-            MERGER["Chronological event merger"]
-            DISPATCH["Dispatcher + virtual scheduler"]
-            STORE["HistoricalLOBStore"]
-            READER --> MERGER --> DISPATCH
-            DISPATCH --> STORE
+    subgraph NATIVE["Native runtime"]
+        subgraph DISPATCHER["Dispatcher thread"]
+            READER["JsonlReader"]
+            SOURCE["JsonlScheduledSource"]
+            BOOKS["HistoricalLOBStore"]
+            SCHED["ChronologicalScheduler"]
+
+            READER --> SOURCE
+            SOURCE --> BOOKS
+            SOURCE --> SCHED
         end
 
-        subgraph TT["Trading Engine thread"]
-            CONSUMER["MarketDataConsumer"]
-            CLOCK["VirtualClock"]
+        subgraph CONSUMER["Trading thread"]
+            ENGINE["TradingEngine"]
             SIM["SimulatedLOB / EngineView"]
-            OM["OrderManager"]
-            POS["PositionKeeper"]
-            ADAPTER["StrategyAdapter"]
-            REC["ResultRecorder"]
+            POSITION["PositionKeeper"]
+            RECORDER["ResultRecorder"]
 
-            CONSUMER --> CLOCK
-            CONSUMER --> SIM
-            SIM --> OM --> POS
-            OM --> REC
-            POS --> REC
-            OM --> ADAPTER
+            ENGINE --> SIM
+            ENGINE --> POSITION
+            ENGINE --> RECORDER
         end
 
-        EVTQ[["SPSC engine-event ring"]]
-        CMDQ[["SPSC order-command ring"]]
-        READY[("atomic processed_seq")]
+        EVENTQ[["SPSC ScheduledEvent ring"]]
+        COMMANDQ[["SPSC OrderCommand ring"]]
+        READY[("processed_seq")]
 
-        DISPATCH --> EVTQ --> CONSUMER
-        OM --> CMDQ --> DISPATCH
-        CONSUMER --> READY
-        READY -. "barrier" .-> DISPATCH
+        SCHED --> EVENTQ --> ENGINE
+        ENGINE --> COMMANDQ --> SCHED
+        ENGINE --> READY
+        READY -. "acknowledgement" .-> SCHED
     end
 
-    RUN --> DISPATCH
-    ADAPTER <--> STRAT
-    REC --> PANDAS
+    RUN --> NATIVE
+    ENGINE <--> ADAPTER
+    RECORDER --> PYRESULT
 ```
 
-## 3. Why two threads
+`SchedulerRuntime::run()` starts and joins both native threads. The Python
+binding releases the GIL around the native run. The trading thread reacquires
+the GIL only while calling a Python strategy method.
 
-The assignment explicitly distinguishes a backtest engine thread and trading engine thread and requires an atomic ready sequence. The two-thread design demonstrates the intended synchronization while staying small enough for a course project.
+## Ownership
 
-- The Backtest Engine owns chronological scheduling and writes the shared historical book.
-- The Trading Engine consumes one published event at a time, matches private orders, updates state, and invokes Python.
-- The strict barrier means the shared book is stable while the Trading Engine reacts to the current event.
+| State | Writer | Read access |
+|---|---|---|
+| JSONL reader and staged atomic group | Dispatcher thread | Dispatcher only |
+| `HistoricalLOBStore` | Dispatcher thread | Trading thread while dispatcher waits for acknowledgement |
+| Scheduler heap and source merge state | Dispatcher thread | Dispatcher only |
+| Event ring | Dispatcher producer | Trading consumer |
+| Command ring | Trading producer | Dispatcher consumer |
+| Virtual clock and private orders | Trading thread | Strategy during an active callback |
+| Positions and private consumption | Trading thread | Strategy during an active callback |
+| Mutable result recorder | Trading thread | Runtime marking code executes in the same consumer callback |
+| Frozen result storage | No writers after `freeze()` | Python arrays/DataFrames |
+| Python Strategy object | Python owns lifetime | Trading thread invokes it while holding the GIL |
 
-## 4. Strategy location
+Single-writer ownership and the ready barrier avoid hot-path book mutexes in the
+mandatory runtime.
 
-The strategy implementation is Python-side. C++ defines a Strategy interface/trampoline and calls the Python override from the Trading Engine thread. The “Strategy Logic” box in the source diagram is therefore the runtime callback location, not a requirement to implement strategies in C++.
-
-## 5. Market-event sequence
+## Market-delivery flow
 
 ```mermaid
 sequenceDiagram
+    participant R as JsonlReader
     participant D as Dispatcher
     participant H as HistoricalLOBStore
-    participant Q as Engine event ring
-    participant T as Trading Engine
+    participant T as TradingEngine
     participant S as SimulatedLOB
-    participant O as OrderManager / PositionKeeper
     participant P as Python Strategy
+    participant O as ResultRecorder
 
-    D->>H: apply atomic historical update/group
-    D->>Q: publish event(dispatch_seq, scheduled_ts)
-    Q->>T: consume event
-    T->>T: virtual_clock = scheduled_ts
-    T->>S: re-evaluate resting own orders
-    S-->>O: zero or more fills
-    O->>O: update order state, position, result buffers
-    O->>P: on_fill() for each fill
-    T->>P: on_book_update() and/or on_trade()
-    P->>O: optional submit/cancel
-    O-->>D: enqueue command(arrival_ts)
-    T->>D: processed_seq = dispatch_seq
-    D->>D: continue with next scheduled event
+    R->>D: stage one complete atomic group
+    D->>D: compare market key with queued commands
+    D->>H: apply group when market event wins
+    D->>T: publish ScheduledEvent(dispatch_seq)
+    T->>T: set virtual clock
+    T->>S: re-evaluate resting orders against H
+    S-->>T: SyntheticFill decisions
+    T->>O: record state/fills
+    T->>P: on_fill() zero or more times
+    T->>P: on_trade() in source order
+    T->>P: on_book_update() if top-N changed
+    T->>D: publish processed_seq
 ```
 
-## 6. Order-arrival sequence
+The source stages a group before chronological selection but delays historical
+book mutation until `prepare_for_dispatch()`. A strategy command scheduled
+before that market group therefore observes the old book. Equal-time market
+data still wins because market priority is lower numerically.
+
+## Order and cancel flow
 
 ```mermaid
 sequenceDiagram
     participant P as Python Strategy
-    participant O as OrderManager
-    participant C as Command ring
+    participant T as TradingEngine
+    participant Q as Command ring
     participant D as Dispatcher
-    participant T as Trading Engine
+    participant H as HistoricalLOBStore
     participant S as SimulatedLOB
     participant R as ResultRecorder
 
-    P->>O: submit_limit(instrument, side, price, qty)
-    O->>O: allocate ClOrdId and set state = PendingNew
-    O->>C: NewOrderCommand(arrival_ts)
-    C->>D: drain into chronological scheduler
-    D->>T: publish NewOrderArrival
-    T->>S: validate and match against stable historical book
+    P->>T: submit_limit(...)
+    T->>R: PendingNew / Submit
+    T->>Q: NewOrderCommand(now + order latency)
+    Q->>D: drain command
+    D->>T: NewOrder arrival
+    T->>R: Open / Accepted
+    T->>S: accept order against H
+    S-->>T: SyntheticFill decisions
+    T->>R: zero or more Fill transitions
+    T->>P: on_fill() after state update
 
-    alt rejected
-        S-->>O: Reject
-        O->>O: PendingNew -> Rejected
-        O->>R: append transition
-        O->>P: on_reject()
-    else full fill
-        S-->>O: Fill(s)
-        O->>O: PendingNew -> Filled and update position
-        O->>R: append fills and transitions
-        O->>P: on_fill()
-    else partial or no immediate fill
-        S-->>O: Fill(s) and/or resting remainder
-        O->>O: PendingNew -> PartiallyFilled or Open
-        O->>R: append fills and transitions
-        O->>P: on_fill() for produced fills
+    opt remaining quantity
+        S->>S: rest in EngineView price-time index
     end
 
-    T->>D: processed_seq
+    P->>T: cancel_order(id)
+    T->>R: PendingCancel / CancelRequest
+    T->>Q: CancelCommand(now + order latency)
+    Q->>D: drain command
+    D->>T: Cancel arrival
+    T->>R: Cancelled or typed reject
 ```
 
-## 7. Runtime ownership summary
+Commands submitted by a callback are fully enqueued before the current event
+is acknowledged. The dispatcher drains them while waiting and merges them with
+future market deliveries.
 
-| State | Sole writer | Readers |
-|---|---|---|
-| Historical market book | Backtest Engine thread | Trading Engine while dispatcher waits |
-| Scheduler heap / command ordering | Backtest Engine thread | none |
-| EngineView private overlay | Trading Engine thread | strategy queries on same thread |
-| OrderManager / PositionKeeper | Trading Engine thread | strategy callbacks on same thread |
-| Result buffers | Trading Engine thread during run | Python after threads join |
-| Python strategy object | Python caller owns lifetime; Trading Engine invokes | Python caller after run |
+## End of run
 
-Avoiding multi-writer state is more valuable here than introducing general-purpose locking.
+At normal end-of-data, commands at or before the inclusive range end are
+processed, rings are closed, threads join, and `ResultRecorder::freeze()`
+produces immutable shared storage. On failure, the first exception triggers the
+same wake-and-join path and is rethrown after both threads exit.

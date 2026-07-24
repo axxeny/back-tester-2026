@@ -5,34 +5,28 @@
 #include <string>
 #include <unordered_map>
 
-// Маршрутизатор событий -> LOB.
-// Ведёт отдельный LOB для каждого instrument_id.
-// Решает, когда печатать промежуточные snapshot-ы.
+// Routes events to one LOB per instrument_id and controls periodic snapshots.
 class LobRouter {
 public:
-  // Сконструировать роутер.
-  // snapshotIntervalEvents: печатать snapshot каждые N событий (0 = не
-  // печатать).
+  // Print a snapshot every N events; zero disables periodic snapshots.
   explicit LobRouter(std::size_t snapshotIntervalEvents = 50000);
 
-  // Принять событие и направить в соответствующий LOB.
-  // Вызывается последовательно для каждого события из хронологически
-  // упорядоченного потока (producer).
+  // Route one event from the chronologically ordered producer stream.
   void route(const MarketDataEvent &event);
 
-  // Вывести финальное состояние: best bid/ask для каждого инструмента.
+  // Print the final best bid and ask for each instrument.
   void printFinalState(std::ostream &os) const;
 
-  // Вывести агрегированную статистику по всем инструментам.
+  // Print aggregate statistics for all instruments.
   void printStats(std::ostream &os) const;
 
 private:
-  // instrument_id -> его LOB
+  // instrument_id -> LOB
   std::unordered_map<long long, std::shared_ptr<LimitOrderBook>> lobs_;
-  // instrument_id -> символ (для читаемого вывода)
+  // instrument_id -> display symbol
   std::unordered_map<long long, std::string> symbols_;
   std::size_t totalEventsRouted_ = 0;
   std::size_t snapshotInterval_ = 0;
-  // Отслеживаем момент последнего snapshot для F_LAST-события
+  // Event count at the last F_LAST snapshot.
   std::size_t lastSnapshotAt_ = 0;
 };

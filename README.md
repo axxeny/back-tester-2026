@@ -1,10 +1,24 @@
 # CMF Advanced Backtesting Engine for Options
 
-## Учебник
+Deterministic C++20/Python backtesting engine for replaying Databento-like MBO
+data, simulating latency-aware private limit orders, and returning fills, order
+transitions, positions, and PnL to Python.
 
-Подробное русскоязычное объяснение архитектуры, связи Python с C++, полного
-пути события, matching, PnL, тестов и benchmarks находится в
-[`docs/tutorial/README.md`](docs/tutorial/README.md).
+```text
+MBO JSONL -> historical L3 books -> chronological scheduler
+          -> trading engine -> Python Strategy callbacks
+          -> frozen native columns -> pandas results
+```
+
+The runtime is deterministic and multi-instrument. It uses one dispatcher
+thread, one trading thread, fixed market-data/order latency, an atomic processed
+sequence barrier, displayed-depth fill-at-touch matching, and bulk
+NumPy/pandas result hand-off.
+
+- [New contributor guide](docs/hw4/GETTING_STARTED.md)
+- [Architecture overview](docs/hw4/architecture/README.md)
+- [Assignment-to-code traceability](docs/hw4/architecture/11_requirements_traceability.md)
+- [Homework 4 source requirements](docs/hw4/source/01_homework_4_assignment.md)
 
 ## Prerequisites
 

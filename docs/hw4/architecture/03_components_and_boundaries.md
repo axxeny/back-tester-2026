@@ -1,214 +1,172 @@
-# Components, ownership, and dependencies
+# Components, source tree, and boundaries
 
-## 1. Dependency direction
+## Dependency direction
 
 ```mermaid
 flowchart LR
-    CORE[core]
-    MARKET[market]
-    SCHED[scheduler]
-    TRADING[trading]
-    RESULTS[results]
-    PY[python bindings]
-    APP[CLI / integration]
+    CORE["core"]
+    MARKET["market"]
+    SCHED["scheduler"]
+    TRADING["trading"]
+    RESULTS["results"]
+    RUNTIME["runtime"]
+    PY["python bindings"]
+    LEGACY["main / CLI"]
 
     MARKET --> CORE
     SCHED --> CORE
-    SCHED --> MARKET
     TRADING --> CORE
     TRADING --> MARKET
     TRADING --> SCHED
     RESULTS --> CORE
     RESULTS --> TRADING
-    PY --> CORE
-    PY --> TRADING
-    PY --> RESULTS
-    APP --> MARKET
-    APP --> SCHED
-    APP --> TRADING
-    APP --> RESULTS
+    RUNTIME --> MARKET
+    RUNTIME --> SCHED
+    RUNTIME --> TRADING
+    RUNTIME --> RESULTS
+    PY --> RUNTIME
+    LEGACY --> CORE
 ```
 
-Rules:
+The build currently compiles native implementation files into the static
+library `back-tester-lib`. Folder boundaries still define ownership even though
+they are not separate libraries.
 
-- `core` depends on no project module.
-- `market` must not depend on Python, pandas, Strategy, or OrderManager.
-- `scheduler` owns ordering and synchronization, not matching rules.
-- `trading` owns private state and matching, not JSON parsing.
-- `results` records already-decided events; it does not decide fills.
-- `python` is a boundary adapter, not the home of engine semantics.
-
-## 2. Component responsibilities
-
-### `core`
-
-Owns:
-
-- fixed-width type aliases;
-- enums for side, order state, command/event type, reject reason;
-- `InstrumentMeta` and `BacktestConfig`;
-- immutable message/view structs;
-- lightweight error types.
-
-Must not own JSON, book containers, scheduler queues, pandas, or Python objects.
-
-### `market`
-
-Owns:
-
-- JSONL parsing and validation;
-- decimal-price-to-ticks and timestamp-to-nanoseconds conversion;
-- source iterators and a minimal chronological merge interface;
-- per-instrument `LimitOrderBook` and `HistoricalLOBStore`;
-- top-N extraction and level revision tracking;
-- source sequence validation.
-
-The first implementation may support one already-sorted file, but the interface must not require loading and sorting the complete file in memory.
-
-### `scheduler`
-
-Owns:
-
-- `ScheduledEvent` ordering key;
-- historical delivery, new-order arrival, and cancel-arrival events;
-- dynamic merge of source events and commands;
-- the two SPSC rings;
-- `dispatch_seq` and `processed_seq`;
-- start/stop/join and exception-safe unblocking.
-
-It must not know Python callback details or calculate fills.
-
-### `trading`
-
-Owns:
-
-- `MarketDataConsumer` and virtual clock;
-- `EngineView` private orders and historical consumption;
-- `SimulatedLOB` matching and resting-order reevaluation;
-- `OrderManager` state transitions and command submission;
-- `PositionKeeper` and strategy-query views;
-- the native Strategy interface used by pybind11.
-
-### `results`
-
-Owns:
-
-- typed column buffers for fills and order transitions;
-- PnL sampling buffers;
-- buffer reservation and lifetime;
-- read-only result access after the run.
-
-It must not call pandas during the native event loop.
-
-### `python`
-
-Owns:
-
-- pybind11 bindings for core types and views;
-- Strategy trampoline and callback GIL windows;
-- Python-facing `BacktestConfig`, `StrategyContext`, and `Result` wrappers;
-- `backtest.run()` orchestration entry point;
-- bulk conversion of result buffers to NumPy/pandas.
-
-### `app`
-
-Owns:
-
-- optional CLI argument parsing;
-- a small executable smoke path;
-- examples, not engine behavior.
-
-## 3. Proposed repository layout
-
-The exact migration can be incremental; avoid a single giant move-only commit.
+## Implemented source layout
 
 ```text
 src/
-  core/
-    Types.hpp
-    Events.hpp
-    BacktestConfig.hpp
-  market/
-    MarketDataEvent.*
-    JsonlReader.*
-    EventMerger.*
-    LimitOrderBook.*
-    HistoricalLOBStore.*
-  scheduler/
-    SpscRing.hpp
-    ChronologicalDispatcher.*
-  trading/
-    EngineView.*
-    SimulatedLOB.*
-    OrderManager.*
-    PositionKeeper.*
-    MarketDataConsumer.*
-    TradingEngine.*
-    Strategy.hpp
-  results/
-    ResultRecorder.*
-    ResultBuffers.*
-  python/
-    Bindings.cpp
-    StrategyBindings.cpp
-    ResultBindings.cpp
-  app/
-    main.cpp
+  core/        dependency-free public contracts
+  market/      typed JSONL ingestion and historical L3 books
+  scheduler/   event ordering, SPSC queues, ready barrier, thread runtime
+  trading/     private orders, matching, callbacks, positions
+  results/     columnar result storage and PnL
+  runtime/     end-to-end source/scheduler/engine composition
+  python/      pybind11 API and pandas/NumPy hand-off
+  common/      compatibility include for legacy BasicTypes users
+  main/        CLI plus earlier standalone LOB compatibility code
 python/
-  back_tester/
-    __init__.py
-    api.py
-    result.py
-test/
-  unit/
-  integration/
-  benchmark/
-  data/
+  back_tester/ public import package
+  tests/       Python integration and end-to-end tests
+  benchmarks/  Python callback benchmark
+test/          native unit/integration tests and fixtures
+examples/      runnable Python strategy
 ```
 
-## 4. Recommended CMake targets
+## Component responsibilities
 
-Keep the target graph small:
+### `src/core`
 
-- `backtester_core` — core + market + scheduler + trading + results native library, or split into at most two static libraries if compilation ownership requires it;
-- `_backtester` — pybind11 extension;
-- `backtester_cli` — optional executable;
-- `backtester_tests` — native tests;
-- `backtester_benchmarks` — required benchmarks.
+Defines the shared numeric and enum types, configuration, scheduled payloads,
+callback views, query rows, and result row schemas:
 
-Do not turn every folder into a shared library.
+- [`Types.hpp`](../../../src/core/Types.hpp)
+- [`BacktestConfig.hpp`](../../../src/core/BacktestConfig.hpp)
+- [`Events.hpp`](../../../src/core/Events.hpp)
+- [`ResultSchemas.hpp`](../../../src/core/ResultSchemas.hpp)
+- [`Contracts.hpp`](../../../src/core/Contracts.hpp)
 
-## 5. Shared contract header
+This layer contains no JSON, book containers, Python objects, scheduler queues,
+or matching logic.
 
-Public cross-team structs should live in a single stable area such as `src/core/Events.hpp` and be changed only through a contract task. Suggested core types:
+### `src/market`
 
-```cpp
-using TimestampNs = std::int64_t;
-using InstrumentId = std::int64_t;
-using ClOrdId = std::uint64_t;
-using ExchangeOrderId = std::uint64_t;
-using PriceTicks = std::int64_t;
-using Quantity = std::int64_t;
+Owns input parsing and shared historical state:
 
-struct BookLevel {
-    PriceTicks price;
-    Quantity quantity;
-};
-```
+- `JsonlReader` streams and validates physical JSONL rows.
+- `Parsing` converts timestamps and decimal prices once into native integers.
+- `LimitOrderBook` reconstructs per-instrument L3 state and exposes ordered
+  historical slices and top-N aggregated levels.
+- `HistoricalLOBStore` routes events to one book per instrument.
 
-Prefer immutable event values and non-owning spans only for callback-scoped views whose lifetime is explicitly documented.
+Malformed rows, unsupported values, source chronology regression, and corrupt
+L3 actions raise typed errors. The reader does not load or sort the full replay.
 
-## 6. Parallel development boundaries
+### `src/scheduler`
 
-Safe after core contracts are frozen:
+Owns deterministic time ordering and thread synchronization:
 
-- market ingestion/book work and scheduler queue work can proceed in parallel;
-- Python Strategy API can proceed against a stub native context;
-- result-buffer work can proceed against frozen result schemas.
+- `ChronologicalScheduler` is the bounded pending-command heap.
+- `SchedulerRuntime` merges one prefetched market group with delayed commands,
+  starts the dispatcher and consumer threads, and propagates failures.
+- `SpscRing` carries events and commands with documented acquire/release
+  publication.
+- `ReadyBarrier` carries the atomic processed sequence.
 
-Unsafe to parallelize without an explicit integration owner:
+The scheduler does not parse JSON, calculate fills, call Python, or own
+strategy state.
 
-- simultaneous edits to `BasicTypes.hpp` or replacement contract headers;
-- multiple branches changing pyproject/CMake target names;
-- one branch changing order states while another binds them;
-- one branch changing fill columns while another builds pandas conversion.
+### `src/trading`
+
+Owns strategy-visible mutable state:
+
+- `TradingEngine` implements `StrategyContext`, command submission, lifecycle
+  transitions, position/result application, and callback order.
+- `SimulatedLOB` is the sole synthetic-fill authority; its `EngineView` owns
+  private consumption and price-time resting indexes.
+- `PositionKeeper` maintains signed quantity and FIFO realized-PnL inputs.
+- `Strategy` and `Recorder` are narrow native callback interfaces.
+
+The trading module reads but never mutates `HistoricalLOBStore`.
+
+### `src/results`
+
+`ResultRecorder` appends typed fill/order/PnL columns, maintains exact
+multiplier-scaled accounting, coalesces equal-time PnL samples, and freezes its
+buffers into reference-counted immutable `FrozenResults`.
+
+It creates no pandas or Python objects in the native event loop.
+
+### `src/runtime`
+
+`run_backtest()` validates configuration and instrument metadata, constructs
+the books, recorder, trading engine, streaming scheduled source, and scheduler,
+then freezes results after the threads join.
+
+`discover_databento_instruments()` is the optional metadata discovery pass used
+by the minimal three-argument Python API.
+
+### `src/python`
+
+The `_backtester` pybind11 module:
+
+- binds public enums, configuration, callback payloads, query rows, and Result;
+- adapts Python Strategy methods to the native `Strategy` interface;
+- activates the Strategy context only during a callback;
+- releases the GIL for the native run and reacquires it per callback;
+- exposes frozen native columns through NumPy-backed pandas objects.
+
+The pure-Python package `python/back_tester/__init__.py` re-exports the module
+and supplies the documented `backtest.run` namespace.
+
+### `src/main` and `src/common`
+
+`src/main` provides the `back-tester` ingestion CLI and retains compatibility
+LOB code used by legacy focused tests. It is not the implementation behind
+Python `backtest.run()`. `src/common/BasicTypes.hpp` is a compatibility include
+over the core contracts.
+
+## Build targets
+
+| Target | Purpose |
+|---|---|
+| `back-tester-lib` | Native static library containing engine modules |
+| `back-tester` | CLI ingestion smoke executable |
+| `_backtester` | pybind11 extension installed as `back_tester._backtester` |
+| `back-tester-tests` | Native test executable registered with CTest |
+| `back-tester-scheduler-benchmark` | Release ready-signal benchmark |
+
+The extension is enabled by `BUILD_PYTHON_MODULE=ON`; scikit-build-core sets
+that option for editable and wheel builds.
+
+## Boundary rules
+
+- Parse strings and decimals only in `market` or the Python boundary.
+- Keep prices, timestamps, quantities, IDs, states, and sequences numeric in
+  the event and matching paths.
+- Only the dispatcher writes the historical book.
+- Only the trading thread writes private orders and positions.
+- Only `SimulatedLOB` creates synthetic fills; `TradingEngine` applies them.
+- Only `ResultRecorder` owns mutable result buffers.
+- Python callback payloads are immutable values; callback-scoped native spans
+  are copied before exposure to Python.

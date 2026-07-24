@@ -1,72 +1,67 @@
 #pragma once
-#include "MarketDataEvent.hpp"
 #include "BookTypes.hpp"
+#include "MarketDataEvent.hpp"
+#include <functional>
 #include <map>
 #include <optional>
-#include <vector>
-#include <unordered_map>
-#include <functional>
 #include <ostream>
+#include <unordered_map>
+#include <vector>
 
-// Книга заявок (LOB) для одного инструмента.
-// Поддерживает операции Add/Cancel/Modify/Clear в O(log N).
-// Trade и Fill не изменяют книгу напрямую — их обрабатывает
-// LOB для статистики, но не для удаления ордеров
-// (Cancel/Fill придут отдельными сообщениями от биржи).
+// Limit order book (LOB) for one instrument.
+// Supports Add/Cancel/Modify/Clear operations in O(log N).
+// Trade and Fill records are handled for book maintenance and statistics;
+// passive liquidity changes arrive as separate exchange records.
 class LimitOrderBook {
 public:
-    // Применить одно MBO-событие к стакану.
-    // Диспетчеризует по event.action на соответствующий private-метод.
-    void applyEvent(const MarketDataEvent& event);
+  // Apply one MBO event by dispatching event.action to its private handler.
+  void applyEvent(const MarketDataEvent &event);
 
-    // Вернуть лучшую цену бида (std::nullopt если бидов нет)
-    std::optional<double> bestBid() const;
-    // Вернуть лучшую цену аска (std::nullopt если асков нет)
-    std::optional<double> bestAsk() const;
+  // Return the best bid price, or std::nullopt when there are no bids.
+  std::optional<double> bestBid() const;
+  // Return the best ask price, or std::nullopt when there are no asks.
+  std::optional<double> bestAsk() const;
 
-    // Суммарный объём на лучшем биде / аске
-    long long bestBidSize() const;
-    long long bestAskSize() const;
+  // Return aggregate quantity at the best bid or ask.
+  long long bestBidSize() const;
+  long long bestAskSize() const;
 
-    // Вернуть агрегированный snapshot стакана. depth=0 means all visible levels.
-    BookSnapshot snapshot(std::size_t depth = 0) const;
+  // Return an aggregated snapshot. depth=0 includes all visible levels.
+  BookSnapshot snapshot(std::size_t depth = 0) const;
 
-    // Вывести snapshot стакана (top N уровней с каждой стороны)
-    void printSnapshot(std::ostream& os, int depth = 5) const;
+  // Print the top N levels on each side.
+  void printSnapshot(std::ostream &os, int depth = 5) const;
 
-    // Счётчики событий для статистики
-    long long totalAdds    = 0;
-    long long totalCancels = 0;
-    long long totalTrades  = 0;
-    long long totalClears  = 0;
+  // Event counters used for statistics.
+  long long totalAdds = 0;
+  long long totalCancels = 0;
+  long long totalTrades = 0;
+  long long totalClears = 0;
 
 private:
-    // action='A': вставить новую заявку в стакан.
-    // Если order_id уже существует — обновить size (idempotent replay).
-    void onAdd(const MarketDataEvent& e);
+  // action='A': insert an order. An existing order_id is overwritten.
+  void onAdd(const MarketDataEvent &e);
 
-    // action='C': удалить заявку по order_id.
-    // Используем orderIndex для O(1) нахождения уровня цены.
-    void onCancel(const MarketDataEvent& e);
+  // action='C': remove by order_id using the O(1) price-level index.
+  void onCancel(const MarketDataEvent &e);
 
-    // action='M': изменить цену/объём заявки.
-    // = onCancel(старый) + onAdd(новый).
-    void onModify(const MarketDataEvent& e);
+  // action='M': update price/quantity as cancel followed by add.
+  void onModify(const MarketDataEvent &e);
 
-    // action='R': полный сброс стакана (Clear).
-    // Биржа присылает перед snapshot-восстановлением.
-    void onClear();
+  // action='R': clear the complete book before snapshot reconstruction.
+  void onClear();
 
-    // action='T': сделка (агрессор). Не изменяет стакан.
-    void onTrade(const MarketDataEvent& e);
+  // action='T': aggressor-side trade; does not mutate the resting book.
+  void onTrade(const MarketDataEvent &e);
 
-    // action='F': исполнение пассивного ордера. Уменьшает size.
-    void onFill(const MarketDataEvent& e);
+  // action='F': execution of a passive order.
+  void onFill(const MarketDataEvent &e);
 
-    // Биды: цена -> (order_id -> size). std::greater<> => begin() = лучший бид.
-    std::map<double, std::map<std::string, long long>, std::greater<double>> bids_;
-    // Аски: цена -> (order_id -> size). begin() = лучший аск (наименьшая цена).
-    std::map<double, std::map<std::string, long long>> asks_;
-    // Индекс: order_id -> {side, price} для O(1) Cancel/Fill
-    std::unordered_map<std::string, std::pair<char, double>> orderIndex_;
+  // Bids: price -> (order_id -> size); begin() is the best bid.
+  std::map<double, std::map<std::string, long long>, std::greater<double>>
+      bids_;
+  // Asks: price -> (order_id -> size); begin() is the best (lowest) ask.
+  std::map<double, std::map<std::string, long long>> asks_;
+  // Index: order_id -> {side, price} for O(1) Cancel/Fill lookup.
+  std::unordered_map<std::string, std::pair<char, double>> orderIndex_;
 };

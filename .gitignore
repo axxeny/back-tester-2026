@@ -6,6 +6,13 @@ log
 .claude
 CLAUDE.md
 
+# Personal generated documentation
+/docs/tutorial/
+
+# Local Codex/IDE configuration and macOS metadata
+/.codex/
+.DS_Store
+
 
 ### C++ ###
 # Prerequisites

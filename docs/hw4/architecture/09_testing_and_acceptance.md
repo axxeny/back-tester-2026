@@ -1,121 +1,104 @@
-# Testing strategy and acceptance criteria
+# Verification and acceptance
 
-## 1. Testing layers
+## Test layers
 
-### Native unit tests
+### Native unit and integration tests
 
-Test one component without Python or real files:
+The `back-tester-tests` executable covers:
 
-- decimal/timestamp parsing;
-- L3 add/cancel/modify/fill/clear;
-- top-N extraction and revisions;
-- SPSC ring boundaries;
-- scheduled event ordering;
-- order state transitions;
-- matching and private consumption;
-- position and PnL arithmetic.
+- exact timestamp/decimal parsing and input failure context;
+- L3 add, cancel, modify, partial fill, clear, duplicates, and revisions;
+- multi-instrument book routing and top-N extraction;
+- scheduled ordering, SPSC backpressure, ready acknowledgement, stop, and
+  exception recovery;
+- delayed order/cancel arrival and equal-time priority;
+- displayed-depth sweeps, resting fills, price-time priority, and private
+  consumption;
+- rejects, order transitions, positions, exact PnL, buffer ownership, and
+  deterministic repeated runs;
+- complete runtime composition from a temporary JSONL source.
 
-### Native integration tests
-
-Run both native threads with a C++ no-op or scripted Strategy:
-
-- market event → callback;
-- callback submission → delayed arrival → fill/rest;
-- later book move → resting fill;
-- cancel/fill race;
-- stop and exception unblocking;
-- deterministic repeated results.
+CTest also verifies CLI usage and valid/invalid checked-in fixtures.
 
 ### Python integration tests
 
-Build/import the extension and verify:
+`python/tests` covers:
 
-- Strategy subclass callbacks;
-- multi-instrument context queries;
-- Python submission and cancel;
-- Result DataFrame columns/dtypes;
-- native-buffer lifetime;
-- Python exception propagation;
-- second run after a failed run.
+- package API and bound types;
+- callback payloads and callback-scoped Strategy context;
+- order submission, cancellation, rejects, and multi-instrument queries;
+- Python exception propagation, clean thread shutdown, and runtime reuse;
+- DataFrame/Series columns, dtypes, and native-buffer lifetime;
+- the real two-instrument end-to-end strategy;
+- deterministic repeated results;
+- benchmark output contracts.
 
-### Independent QA
+### Sanitizers
 
-QA must add or run tests not authored by the implementation agent and build from a clean worktree.
+The final verification supports ASan/UBSan and TSan builds where the host
+compiler provides them. The mandatory ownership model is designed to keep the
+shared historical book race-free without a hot-path mutex.
 
-## 2. Required matching cases
+## Reproducible verification
 
-1. marketable buy at touch;
-2. marketable sell at touch;
-3. non-marketable order rests;
-4. partial fill due to displayed size;
-5. sweep across multiple levels up to limit;
-6. limit protection stops sweep;
-7. later market event fills a resting order;
-8. two own orders at one price respect FIFO;
-9. stale private consumption resets on historical revision;
-10. two EngineViews do not see each other's private orders/consumption;
-11. duplicate or invalid order rejects deterministically;
-12. unknown cancel is handled deterministically;
-13. own private view does not remain crossed after immediate matching.
+From the repository root:
 
-## 3. Required event/concurrency cases
-
-1. virtual clock equals scheduled event time;
-2. order cannot arrive before `submit + order_latency`;
-3. equal timestamps obey the documented priority;
-4. `processed_seq` advances only after callbacks and command enqueue;
-5. producer can prefetch but consumer does not process N+1 early;
-6. queue-full behavior does not lose or reorder commands;
-7. normal end-of-data joins both threads;
-8. Python exception cannot deadlock the dispatcher;
-9. 20 repeated runs produce identical normalized results;
-10. sanitizer run reports no data race in the mandatory one-engine mode.
-
-## 4. Required result cases
-
-- signed position equals sum of signed fills per instrument;
-- cumulative filled quantity never exceeds order quantity;
-- terminal orders disappear from `open_orders()`;
-- contract multiplier affects PnL but not raw position;
-- midpoint marking and stale-mark fallback are deterministic;
-- one order-log row exists per visible transition;
-- returned arrays remain valid after native engine teardown;
-- no per-row Python append path exists.
-
-## 5. Build/package acceptance
-
-From a clean checkout, the documented commands must:
-
-1. install/sync the chosen Python environment;
-2. build the editable extension;
-3. import `back_tester`;
-4. build native targets;
-5. run native and Python tests;
-6. run the example strategy.
-
-The build must not require an untracked local `3rdparty` directory or a hard-coded data path.
-
-## 6. End-to-end checkpoint
-
-A checked-in tiny deterministic JSONL fixture drives a Python mean-reversion smoke strategy through:
-
-```text
-reader → dispatcher → HistoricalLOB → event ring → MarketDataConsumer
-→ SimulatedLOB → OrderManager/PositionKeeper → Python callbacks → Result
+```bash
+uv sync --locked
+uv run pip install -e .
+uv run python -c "import back_tester; print(back_tester.__file__); print(back_tester.version())"
+uv run cmake -S . -B build-release -G Ninja \
+  -DCMAKE_BUILD_TYPE=Release -DBUILD_TESTS=ON
+uv run cmake --build build-release -j
+uv run ctest --test-dir build-release --output-on-failure
+uv run pytest -q python/tests
+uv run python examples/mean_reversion.py
 ```
 
-The test must assert exact callback order, at least one real submitted order, expected fill/state/position, and stable result columns.
+Benchmarks:
 
-## 7. Final Homework 4 definition of done
+```bash
+build-release/bin/test/back-tester-scheduler-benchmark
+uv run python python/benchmarks/callback_overhead.py
+```
 
-- `pip install -e .` builds and imports the native module.
-- A Python strategy receives multi-instrument top-N callbacks.
-- `submit_limit()` creates `PendingNew`, respects order latency, and deterministically fills or rests.
-- Resting orders fill on later market changes.
-- Position and order state are updated before `on_fill()`.
-- Cancel passes through `PendingCancel` and reaches a terminal result.
-- `Result` returns PnL, fills, and order log through bulk buffers.
-- Synthetic and end-to-end tests pass repeatedly.
-- Ready-signal and 1,000-callback benchmarks run in Release mode.
-- Python errors and shutdown leave no deadlocked thread.
-- Independent QA and review have no unresolved P0/P1 finding.
+Development formatting/lint checks:
+
+```bash
+uv run pre-commit run --all-files
+```
+
+## Behavioral acceptance
+
+The test suite locks the following system behavior:
+
+- virtual time never moves backwards;
+- market, new order, and cancel events use documented stable ordering;
+- an order cannot arrive before `submit time + order latency`;
+- the dispatcher does not mutate the next market state before acknowledgement;
+- matching consumes only displayed historical liquidity at or through the
+  limit;
+- partial fills, multiple levels, later resting fills, and private revisions
+  are deterministic;
+- position and order state are updated before callbacks;
+- terminal orders leave the open-order index;
+- Python failures cannot strand a queue or barrier;
+- returned result objects retain immutable native storage;
+- repeated normalized runs produce identical order/fill ordering.
+
+## Runnable demonstration
+
+```bash
+uv run python examples/mean_reversion.py
+```
+
+The example runs the production `backtest.run()` path on
+`test/data/m5_two_instrument.jsonl`. It demonstrates a delayed resting fill, an
+independent cancelled order, callback ordering, per-instrument positions, and
+PnL output.
+
+## Limit of acceptance
+
+Passing tests establish the deterministic model documented in this directory.
+They do not validate unimplemented exchange behavior such as historical queue
+position, market impact, stochastic fills, option exercise/expiry, or Greeks.
