@@ -6,9 +6,11 @@ does not match orders or create transitions.
 
 Each public result field has one typed `std::vector`. All affected vectors are
 reserved before a row is committed, so allocation failure cannot expose a
-partial row. Position changes are calculated in a staged FIFO ledger and are
-committed only after checked arithmetic and result-capacity preparation
-succeed.
+partial row. FIFO transitions are first analyzed read-only. The ledger uses a
+contiguous lot vector with a logical head, so closures advance an index instead
+of erasing/shifting the live history. Any required lot/result capacity is
+prepared before the no-throw mutation commit. `position_lots_per_instrument`
+allows the caller to reserve the expected lot count up front.
 
 For a closed FIFO lot, realized PnL is:
 
@@ -28,6 +30,11 @@ Every multiplication, addition, and rational normalization is checked before
 state mutation. Missing-sided books retain the last valid mark. Fill samples
 and changed marks at the same engine timestamp replace the last aggregate
 sample.
+
+Marked unrealized PnL is computed from the checked aggregate signed open cost,
+not by walking or copying every FIFO lot. Same-side opens are therefore
+amortized constant-time after reservation; opposite fills inspect only the lots
+they close.
 
 During a run, PnL remains a reduced `int64 numerator / positive int64
 denominator`. `freeze()` performs the only bulk conversion to `double`, marks

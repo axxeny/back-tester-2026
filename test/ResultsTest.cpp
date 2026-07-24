@@ -61,7 +61,7 @@ std::vector<std::int64_t> exact_numerators(const FrozenResults &result) {
 TEST_CASE("Result columns preserve every frozen field and equal lengths",
           "[Results]") {
   const std::array instruments{InstrumentMeta{7, 5, 100, 10}};
-  ResultRecorder recorder(instruments, ResultReserveEstimate{1, 3, 2});
+  ResultRecorder recorder(instruments, ResultReserveEstimate{1, 3, 2, 1});
   recorder.on_order_event(
       order_event(100, OrderLogEventType::Submit, OrderState::PendingNew));
   recorder.on_order_event(
@@ -224,6 +224,39 @@ TEST_CASE("Overflow and invalid marks leave ledger and columns unchanged",
   REQUIRE(result.pnl().size() == 1);
 }
 
+TEST_CASE("Reserved FIFO storage has no per-fill clone or reallocation",
+          "[Results]") {
+  constexpr std::size_t fill_count = 4'096;
+  const std::array instruments{InstrumentMeta{1, 1, 100, 2}};
+  ResultRecorder recorder(
+      instruments,
+      ResultReserveEstimate{fill_count + 2, 0, fill_count + 2, fill_count + 1});
+  REQUIRE(recorder.on_book_mark(1, 0, 99, 101));
+  for (std::size_t index = 0; index < fill_count; ++index) {
+    recorder.on_fill(fill(static_cast<TimestampNs>(index + 1), 1,
+                          static_cast<ClOrdId>(index + 1), Side::Buy,
+                          100 + static_cast<PriceTicks>(index % 7), 1));
+  }
+  auto stats = recorder.position_storage_stats(1);
+  REQUIRE(stats.active_lots == fill_count);
+  REQUIRE(stats.capacity >= fill_count);
+  REQUIRE(stats.runtime_reallocations == 0);
+
+  recorder.on_fill(fill(5'000, 1, 5'000, Side::Sell, 110,
+                        static_cast<Quantity>(fill_count / 2)));
+  stats = recorder.position_storage_stats(1);
+  REQUIRE(stats.active_lots == fill_count / 2);
+  REQUIRE(stats.runtime_reallocations == 0);
+  recorder.on_fill(fill(5'001, 1, 5'001, Side::Buy, 101, 1));
+  stats = recorder.position_storage_stats(1);
+  REQUIRE(stats.active_lots == fill_count / 2 + 1);
+  REQUIRE(stats.runtime_reallocations == 0);
+
+  const auto result = recorder.freeze();
+  REQUIRE(result.fills().size() == fill_count + 2);
+  REQUIRE(result.pnl().size() == fill_count + 2);
+}
+
 TEST_CASE("Frozen empty spans and retained owner keep storage alive",
           "[Results]") {
   const std::array instruments{InstrumentMeta{1, 1, 1, 1}};
@@ -265,7 +298,7 @@ TEST_CASE("Twenty native result runs are byte-order deterministic",
   std::vector<TimestampNs> baseline_times;
   std::vector<std::int64_t> baseline_numerators;
   for (int iteration = 0; iteration < 20; ++iteration) {
-    ResultRecorder recorder(instruments, ResultReserveEstimate{4, 0, 8});
+    ResultRecorder recorder(instruments, ResultReserveEstimate{4, 0, 8, 4});
     recorder.on_fill(fill(10, 1, 1, Side::Buy, 100, 2));
     (void)recorder.on_book_mark(1, 11, 100, 101);
     recorder.on_fill(fill(12, 2, 2, Side::Sell, 1'000, 3));

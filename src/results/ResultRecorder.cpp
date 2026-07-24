@@ -3,7 +3,6 @@
 #include <algorithm>
 #include <limits>
 #include <map>
-#include <type_traits>
 #include <utility>
 #include <vector>
 
@@ -63,6 +62,14 @@ struct Rational {
   __int128 result{};
   if (__builtin_add_overflow(left, right, &result)) {
     throw ResultError("PnL addition overflow");
+  }
+  return result;
+}
+
+[[nodiscard]] __int128 negate128(__int128 value) {
+  __int128 result{};
+  if (__builtin_sub_overflow(static_cast<__int128>(0), value, &result)) {
+    throw ResultError("PnL negation overflow");
   }
   return result;
 }
@@ -162,6 +169,9 @@ public:
     Quantity net_quantity{};
     Rational realized;
     std::vector<Lot> lots;
+    std::size_t lot_head{};
+    std::size_t runtime_reallocations{};
+    __int128 open_signed_price_quantity{};
     bool has_mark{};
     __int128 mark_numerator{};
     std::int64_t mark_denominator{1};
@@ -177,11 +187,15 @@ public:
             "instrument metadata values must be positive");
       }
       const auto [iterator, inserted] = ledgers.emplace(
-          meta.instrument_id, Ledger{meta, 0, {}, {}, false, 0, 1});
+          meta.instrument_id, Ledger{meta, 0, {}, {}, 0, 0, 0, false, 0, 1});
       (void)iterator;
       if (!inserted) {
         throw std::invalid_argument("duplicate instrument metadata");
       }
+    }
+    for (auto &[instrument_id, ledger] : ledgers) {
+      (void)instrument_id;
+      ledger.lots.reserve(estimate.position_lots_per_instrument);
     }
     reserve_fills(estimate.fills);
     reserve_orders(estimate.order_events);
@@ -223,33 +237,51 @@ public:
     c.reject_reason.reserve(count);
   }
 
-  [[nodiscard]] Rational instrument_total(const Ledger &ledger) const {
-    Rational total = ledger.realized;
-    if (!ledger.has_mark) {
+  [[nodiscard]] Rational
+  instrument_total_values(const InstrumentMeta &meta, Rational realized,
+                          bool has_mark, __int128 mark_numerator,
+                          std::int64_t mark_denominator, Quantity net_quantity,
+                          __int128 open_signed_price_quantity) const {
+    Rational total = realized;
+    if (!has_mark || net_quantity == 0) {
       return total;
     }
-    for (const auto &lot : ledger.lots) {
-      const __int128 lot_at_mark_denominator =
-          multiply128(lot.price, ledger.mark_denominator);
-      const __int128 difference =
-          add128(ledger.mark_numerator, -lot_at_mark_denominator);
-      const Quantity signed_quantity =
-          lot.side == Side::Buy ? lot.quantity : -lot.quantity;
-      total = add(total, scaled_price_delta(difference, ledger.mark_denominator,
-                                            signed_quantity,
-                                            ledger.meta.contract_multiplier,
-                                            ledger.meta.price_scale));
-    }
+    const __int128 marked_position = multiply128(mark_numerator, net_quantity);
+    const __int128 scaled_open_cost =
+        multiply128(open_signed_price_quantity, mark_denominator);
+    const __int128 difference =
+        add128(marked_position, negate128(scaled_open_cost));
+    total = add(total,
+                scaled_price_delta(difference, mark_denominator, 1,
+                                   meta.contract_multiplier, meta.price_scale));
     return total;
   }
 
-  [[nodiscard]] Rational aggregate_total(InstrumentId override_id,
-                                         const Ledger *override_ledger) const {
+  [[nodiscard]] Rational instrument_total(const Ledger &ledger) const {
+    return instrument_total_values(ledger.meta, ledger.realized,
+                                   ledger.has_mark, ledger.mark_numerator,
+                                   ledger.mark_denominator, ledger.net_quantity,
+                                   ledger.open_signed_price_quantity);
+  }
+
+  [[nodiscard]] Rational
+  aggregate_total(InstrumentId override_id, Quantity projected_net_quantity,
+                  Rational projected_realized,
+                  __int128 projected_open_signed_price_quantity,
+                  bool projected_has_mark, __int128 projected_mark_numerator,
+                  std::int64_t projected_mark_denominator) const {
     Rational aggregate;
     for (const auto &[instrument_id, ledger] : ledgers) {
-      const Ledger &selected =
-          instrument_id == override_id ? *override_ledger : ledger;
-      aggregate = add(aggregate, instrument_total(selected));
+      if (instrument_id != override_id) {
+        aggregate = add(aggregate, instrument_total(ledger));
+        continue;
+      }
+      aggregate =
+          add(aggregate, instrument_total_values(
+                             ledger.meta, projected_realized,
+                             projected_has_mark, projected_mark_numerator,
+                             projected_mark_denominator, projected_net_quantity,
+                             projected_open_signed_price_quantity));
     }
     return aggregate;
   }
@@ -347,7 +379,6 @@ void ResultRecorder::on_order_event(const OrderLogResultRow &row) {
 }
 
 void ResultRecorder::on_fill(const FillResultRow &row) {
-  static_assert(std::is_nothrow_move_assignable_v<Impl::Ledger>);
   impl_->ensure_mutable();
   const auto found = impl_->ledgers.find(row.instrument_id);
   if (found == impl_->ledgers.end()) {
@@ -358,52 +389,89 @@ void ResultRecorder::on_fill(const FillResultRow &row) {
     throw std::invalid_argument("invalid fill result row");
   }
 
-  Impl::Ledger staged = found->second;
+  auto &ledger = found->second;
   const Quantity signed_fill =
       row.side == Side::Buy ? row.quantity : -row.quantity;
   Quantity new_net{};
-  if (__builtin_add_overflow(staged.net_quantity, signed_fill, &new_net)) {
+  if (__builtin_add_overflow(ledger.net_quantity, signed_fill, &new_net)) {
     throw ResultError("position quantity overflow");
   }
 
+  Rational projected_realized = ledger.realized;
+  __int128 projected_open_cost = ledger.open_signed_price_quantity;
   Quantity remaining = row.quantity;
-  std::size_t consumed_lots = 0;
-  while (remaining > 0 && consumed_lots < staged.lots.size() &&
-         staged.lots[consumed_lots].side != row.side) {
-    auto &lot = staged.lots[consumed_lots];
+  std::size_t new_head = ledger.lot_head;
+  bool has_partial_lot = false;
+  Quantity partial_lot_quantity{};
+  while (remaining > 0 && new_head < ledger.lots.size() &&
+         ledger.lots[new_head].side != row.side) {
+    const auto &lot = ledger.lots[new_head];
     const Quantity closing = std::min(remaining, lot.quantity);
     const __int128 price_difference =
         lot.side == Side::Buy
             ? static_cast<__int128>(row.price_ticks) - lot.price
             : static_cast<__int128>(lot.price) - row.price_ticks;
-    staged.realized =
-        add(staged.realized, scaled_price_delta(price_difference, 1, closing,
-                                                staged.meta.contract_multiplier,
-                                                staged.meta.price_scale));
-    lot.quantity -= closing;
+    projected_realized = add(projected_realized,
+                             scaled_price_delta(price_difference, 1, closing,
+                                                ledger.meta.contract_multiplier,
+                                                ledger.meta.price_scale));
+    const Quantity signed_closed = lot.side == Side::Buy ? closing : -closing;
+    const __int128 closed_cost = multiply128(lot.price, signed_closed);
+    projected_open_cost = add128(projected_open_cost, negate128(closed_cost));
     remaining -= closing;
-    if (lot.quantity == 0) {
-      ++consumed_lots;
+    if (closing == lot.quantity) {
+      ++new_head;
+    } else {
+      has_partial_lot = true;
+      partial_lot_quantity = lot.quantity - closing;
     }
   }
-  if (consumed_lots != 0) {
-    staged.lots.erase(staged.lots.begin(),
-                      staged.lots.begin() +
-                          static_cast<std::ptrdiff_t>(consumed_lots));
-  }
-  if (remaining > 0) {
-    staged.lots.push_back(Impl::Lot{row.side, row.price_ticks, remaining});
-  }
-  staged.net_quantity = new_net;
 
-  const Rational aggregate = impl_->aggregate_total(row.instrument_id, &staged);
+  const bool append_lot = remaining > 0;
+  if (remaining > 0) {
+    const Quantity signed_remainder =
+        row.side == Side::Buy ? remaining : -remaining;
+    const __int128 added_cost = multiply128(row.price_ticks, signed_remainder);
+    projected_open_cost = add128(projected_open_cost, added_cost);
+  }
+
+  const Rational aggregate = impl_->aggregate_total(
+      row.instrument_id, new_net, projected_realized, projected_open_cost,
+      ledger.has_mark, ledger.mark_numerator, ledger.mark_denominator);
   auto &c = impl_->storage->fills;
   reserve_row(c.exchange_ts_ns, c.engine_ts_ns, c.instrument_id,
               c.client_order_id, c.side, c.price_ticks, c.quantity,
               c.remaining_quantity, c.liquidity_source);
   impl_->prepare_pnl_append(row.engine_ts_ns);
+  const std::size_t old_lot_capacity = ledger.lots.capacity();
+  if (append_lot) {
+    if (new_head == ledger.lots.size()) {
+      if (ledger.lots.capacity() == 0) {
+        ledger.lots.reserve(1);
+      }
+    } else {
+      reserve_one_more(ledger.lots);
+    }
+  }
 
-  found->second = std::move(staged);
+  if (new_head == ledger.lots.size()) {
+    ledger.lots.clear();
+    ledger.lot_head = 0;
+  } else {
+    ledger.lot_head = new_head;
+    if (has_partial_lot) {
+      ledger.lots[ledger.lot_head].quantity = partial_lot_quantity;
+    }
+  }
+  if (append_lot) {
+    ledger.lots.push_back(Impl::Lot{row.side, row.price_ticks, remaining});
+  }
+  if (ledger.lots.capacity() != old_lot_capacity) {
+    ++ledger.runtime_reallocations;
+  }
+  ledger.realized = projected_realized;
+  ledger.net_quantity = new_net;
+  ledger.open_signed_price_quantity = projected_open_cost;
   c.exchange_ts_ns.push_back(row.exchange_ts_ns);
   c.engine_ts_ns.push_back(row.engine_ts_ns);
   c.instrument_id.push_back(row.instrument_id);
@@ -432,24 +500,27 @@ bool ResultRecorder::on_book_mark(InstrumentId instrument_id,
     throw std::invalid_argument("invalid two-sided book mark");
   }
 
-  Impl::Ledger staged = found->second;
+  auto &ledger = found->second;
   const __int128 midpoint_numerator =
       static_cast<__int128>(*best_bid) + *best_ask;
-  if (staged.has_mark && staged.mark_denominator == 2 &&
-      staged.mark_numerator == midpoint_numerator) {
+  if (ledger.has_mark && ledger.mark_denominator == 2 &&
+      ledger.mark_numerator == midpoint_numerator) {
     return false;
   }
-  staged.has_mark = true;
-  staged.mark_numerator = midpoint_numerator;
-  staged.mark_denominator = 2;
 
-  if (staged.net_quantity == 0) {
-    found->second = std::move(staged);
+  if (ledger.net_quantity == 0) {
+    ledger.has_mark = true;
+    ledger.mark_numerator = midpoint_numerator;
+    ledger.mark_denominator = 2;
     return true;
   }
-  const Rational aggregate = impl_->aggregate_total(instrument_id, &staged);
+  const Rational aggregate = impl_->aggregate_total(
+      instrument_id, ledger.net_quantity, ledger.realized,
+      ledger.open_signed_price_quantity, true, midpoint_numerator, 2);
   impl_->prepare_pnl_append(engine_ts_ns);
-  found->second = std::move(staged);
+  ledger.has_mark = true;
+  ledger.mark_numerator = midpoint_numerator;
+  ledger.mark_denominator = 2;
   impl_->commit_pnl(engine_ts_ns, aggregate);
   return true;
 }
@@ -457,6 +528,17 @@ bool ResultRecorder::on_book_mark(InstrumentId instrument_id,
 Quantity ResultRecorder::position(InstrumentId instrument_id) const {
   const auto found = impl_->ledgers.find(instrument_id);
   return found == impl_->ledgers.end() ? 0 : found->second.net_quantity;
+}
+
+PositionStorageStats
+ResultRecorder::position_storage_stats(InstrumentId instrument_id) const {
+  const auto found = impl_->ledgers.find(instrument_id);
+  if (found == impl_->ledgers.end()) {
+    return {};
+  }
+  const auto &ledger = found->second;
+  return {ledger.lots.size() - ledger.lot_head, ledger.lots.capacity(),
+          ledger.runtime_reallocations};
 }
 
 FrozenResults ResultRecorder::freeze() {

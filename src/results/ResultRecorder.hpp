@@ -22,6 +22,13 @@ struct ResultReserveEstimate {
   std::size_t fills{};
   std::size_t order_events{};
   std::size_t pnl_points{};
+  std::size_t position_lots_per_instrument{};
+};
+
+struct PositionStorageStats {
+  std::size_t active_lots{};
+  std::size_t capacity{};
+  std::size_t runtime_reallocations{};
 };
 
 struct FillColumnsView {
@@ -110,6 +117,8 @@ public:
                     std::optional<PriceTicks> best_ask);
 
   [[nodiscard]] Quantity position(InstrumentId instrument_id) const;
+  [[nodiscard]] PositionStorageStats
+  position_storage_stats(InstrumentId instrument_id) const;
   [[nodiscard]] FrozenResults freeze();
   [[nodiscard]] bool frozen() const noexcept;
 
