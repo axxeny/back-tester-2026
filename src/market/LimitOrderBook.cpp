@@ -252,11 +252,12 @@ void LimitOrderBook::apply(const MarketDataEvent &event) {
     break;
   case MarketAction::Trade:
     ++total_trades_;
-    break;
+    return;
   case MarketAction::Clear:
     clear();
     break;
   }
+  last_book_source_sequence_ = event.source_sequence;
 }
 
 std::optional<HistoricalBookLevel> LimitOrderBook::best_bid() const {

@@ -17,25 +17,28 @@ implementation.
 `HistoricalLOBStore` owns the shared typed L3 replay. A `SimulatedLOB` owns one
 typed `EngineView`, which contains:
 
-- this engine's resting-order price/time indexes;
-- this engine's private historical-liquidity consumption, keyed by instrument,
-  historical order ID, side, and liquidity revision.
+- this engine's resting-order price/time indexes.
 
 Synthetic fills never mutate the shared historical book. Separate
-`EngineView`s therefore see independent private consumption.
+`EngineView`s therefore maintain independent private order state.
 
 ## Matching
 
-An accepted buy sweeps visible historical asks from best to worse while
-`ask_price <= limit_price`; a sell similarly sweeps bids while
-`bid_price >= limit_price`. Fills use the historical order price, support
-partial quantities and multiple levels, and leave any remainder resting.
-Resting own orders are reevaluated after each atomic market group in price/time
-FIFO order. Own orders never self-match.
+An accepted buy fully fills while `best_ask <= limit_price`; a sell fully fills
+while `best_bid >= limit_price`. Otherwise it rests. Later raw best-quote and
+trade-price signals are replayed in source-sequence order. A qualifying signal
+fills the complete remaining quantity at the trigger price, regardless of the
+historical quote or trade size.
 
-The matching loop is numeric and typed: integer ticks, quantities, IDs, and
-revisions. It visits historical liquidity directly without a full-book
-snapshot.
+Trade aggressor side is ignored. Signals and orders must have the same
+`instrument_id`. Every eligible own order is filled in deterministic price-time
+order, and own orders never self-match. Result rows and callbacks identify
+`QuoteCross` versus `TradeCross` and retain the winning raw
+`trigger_source_sequence`.
+
+This is an intentionally optimistic infinite-liquidity model. It does not
+model historical capacity, queue position, market impact, or slippage; order
+sizing against option liquidity is the strategy user's responsibility.
 
 ## Concurrency boundary
 

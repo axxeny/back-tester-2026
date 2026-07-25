@@ -68,3 +68,16 @@ target_link_libraries(back-tester-scheduler-benchmark PRIVATE
 target_compile_definitions(back-tester-scheduler-benchmark PRIVATE
     BACKTESTER_BENCHMARK_BUILD_TYPE="${CMAKE_BUILD_TYPE}"
 )
+
+add_executable(back-tester-price-cross-benchmark
+    PriceCrossBenchmark.cpp
+)
+
+target_link_libraries(back-tester-price-cross-benchmark PRIVATE
+    back-tester-common
+    back-tester-lib
+)
+
+target_compile_definitions(back-tester-price-cross-benchmark PRIVATE
+    BACKTESTER_BENCHMARK_BUILD_TYPE="${CMAKE_BUILD_TYPE}"
+)

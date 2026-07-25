@@ -11,8 +11,8 @@ then removes avoidable allocation and conversion from the event path.
   values.
 - The reader streams physical rows and stages one atomic group; it does not
   load and sort the full file.
-- Historical matching traverses only marketable L3 slices and stops outside the
-  strategy limit.
+- Matching compares typed quote/trade trigger prices against the best eligible
+  private order and does not traverse historical displayed volume.
 - Resting private orders use price-time ordered maps.
 - Top-N callback vectors and source-group buffers are reserved and reused.
 - Result data is appended to typed, pre-reserved columns.
@@ -23,9 +23,10 @@ then removes avoidable allocation and conversion from the event path.
 - DataFrames are materialized once, after the native run.
 
 The historical L3 price indexes and private order indexes use standard-library
-ordered containers. Custom allocators, SIMD, and custom trees are intentionally
-absent because the measured course-project workload does not justify their
-complexity.
+ordered containers. Matching removes crossed private orders from the best price
+forward in deterministic price-time order. Custom allocators, SIMD, and custom
+trees are intentionally absent because the measured course-project workload
+does not justify their complexity.
 
 ## Ready-signal round-trip benchmark
 
@@ -47,6 +48,24 @@ dispatcher publishes a synthetic event
 The benchmark performs warm-up iterations and 100,000 measured iterations. It
 reports build type, compiler, OS/CPU when available, ring capacity, waiting
 strategy, minimum, mean, p50, p95, and p99 nanoseconds.
+
+## Price-cross buffer and replay benchmark
+
+Executable:
+
+```bash
+build-release/bin/test/back-tester-price-cross-benchmark
+```
+
+This measures the Option B hot path that the ready benchmark deliberately
+omits: construction of a reusable typed `PriceCrossSignal` vector followed by
+ordered replay through `SimulatedLOB`. It reports groups of 8 and 64 signals,
+retained vector capacity, first-group reallocations after the runtime's
+`reserve(8)`, mean nanoseconds per group, and mean nanoseconds per signal.
+
+The benchmark uses alternating non-crossing quote/trade signals and one resting
+order, so it measures trigger materialization and predicate replay without
+conflating the result with fill accounting or Python callbacks.
 
 ## Python callback benchmark
 

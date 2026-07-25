@@ -39,7 +39,8 @@ using cmf::scheduler::SpscRing;
 static_assert(!std::is_default_constructible_v<SchedulerRuntimeConfig>);
 
 ScheduledEvent market(cmf::TimestampNs time, Sequence sequence) {
-  return ScheduledEvent{MarketDelivery{1, time - 10, time, sequence, {}, {}}};
+  return ScheduledEvent{
+      MarketDelivery{1, time - 10, time, sequence, {}, {}, {}}};
 }
 
 NewOrderCommand new_order(cmf::TimestampNs time, Sequence sequence) {

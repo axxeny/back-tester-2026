@@ -1,17 +1,8 @@
 #include "trading/SimulatedLOB.hpp"
 
-#include <algorithm>
-#include <functional>
 #include <tuple>
 
 namespace cmf::trading {
-namespace {
-
-[[nodiscard]] std::size_t mix(std::size_t seed, std::size_t value) noexcept {
-  return seed ^ (value + 0x9e3779b97f4a7c15ULL + (seed << 6U) + (seed >> 2U));
-}
-
-} // namespace
 
 bool EngineView::BuyFirst::operator()(const RestingKey &left,
                                       const RestingKey &right) const noexcept {
@@ -24,14 +15,6 @@ bool EngineView::SellFirst::operator()(const RestingKey &left,
                                        const RestingKey &right) const noexcept {
   return std::tie(left.price, left.arrival_sequence, left.client_order_id) <
          std::tie(right.price, right.arrival_sequence, right.client_order_id);
-}
-
-std::size_t EngineView::ConsumptionHash::operator()(
-    const ConsumptionKey &key) const noexcept {
-  std::size_t result = std::hash<InstrumentId>{}(key.instrument_id);
-  result = mix(result, std::hash<int>{}(static_cast<int>(key.historical_side)));
-  result = mix(result, std::hash<ExchangeOrderId>{}(key.exchange_order_id));
-  return mix(result, std::hash<Sequence>{}(key.liquidity_revision));
 }
 
 EngineView::EngineView(std::span<const InstrumentMeta> instruments) {
@@ -67,16 +50,38 @@ SimulatedLOB::accept(ClOrdId client_order_id, InstrumentId instrument_id,
   }
   insert_resting(iterator->second);
   if (book != nullptr) {
-    reevaluate(instrument_id, *book);
+    const auto best_bid = book->best_bid();
+    const auto best_ask = book->best_ask();
+    match_prices(
+        instrument_id,
+        best_ask.has_value() ? std::optional<PriceTicks>{best_ask->price}
+                             : std::nullopt,
+        best_bid.has_value() ? std::optional<PriceTicks>{best_bid->price}
+                             : std::nullopt,
+        LiquiditySource::QuoteCross, book->last_book_source_sequence());
   }
   return fills_;
 }
 
 std::span<const SyntheticFill>
-SimulatedLOB::on_market(InstrumentId instrument_id,
-                        const market::LimitOrderBook &book) {
+SimulatedLOB::on_signal(const PriceCrossSignal &signal) {
   fills_.clear();
-  reevaluate(instrument_id, book);
+  if (signal.source == PriceCrossSource::BestQuote) {
+    if (signal.trade_price.has_value()) {
+      throw SimulatedLOBError("best-quote signal carries a trade price");
+    }
+    match_prices(signal.instrument_id, signal.best_ask, signal.best_bid,
+                 LiquiditySource::QuoteCross, signal.source_sequence);
+  } else if (signal.source == PriceCrossSource::Trade) {
+    if (!signal.trade_price.has_value() || signal.best_bid.has_value() ||
+        signal.best_ask.has_value()) {
+      throw SimulatedLOBError("trade signal has invalid price fields");
+    }
+    match_prices(signal.instrument_id, signal.trade_price, signal.trade_price,
+                 LiquiditySource::TradeCross, signal.source_sequence);
+  } else {
+    throw SimulatedLOBError("price-cross signal has invalid source");
+  }
   return fills_;
 }
 
@@ -89,61 +94,41 @@ void SimulatedLOB::cancel(ClOrdId client_order_id) {
   view_.orders_.erase(iterator);
 }
 
-void SimulatedLOB::reevaluate(InstrumentId instrument_id,
-                              const market::LimitOrderBook &book) {
+void SimulatedLOB::match_prices(InstrumentId instrument_id,
+                                std::optional<PriceTicks> buy_trigger,
+                                std::optional<PriceTicks> sell_trigger,
+                                LiquiditySource liquidity_source,
+                                Sequence trigger_source_sequence) {
   auto instrument = view_.resting_.find(instrument_id);
   if (instrument == view_.resting_.end()) {
-    throw SimulatedLOBError("market update references unknown instrument");
+    throw SimulatedLOBError("price-cross signal references unknown instrument");
   }
 
-  auto process = [&](auto &index) {
-    while (!index.empty()) {
+  auto process = [&](auto &index, std::optional<PriceTicks> trigger,
+                     Side side) {
+    while (trigger.has_value() && !index.empty()) {
       const ClOrdId id = index.begin()->second;
       auto own = view_.orders_.find(id);
       if (own == view_.orders_.end()) {
         throw SimulatedLOBError("resting-order index is inconsistent");
       }
-      const Quantity before = own->second.remaining_quantity;
-      match(own->second, book);
-      if (own->second.remaining_quantity == 0) {
-        view_.orders_.erase(own);
-      } else if (own->second.remaining_quantity == before) {
+      const bool crossed = side == Side::Buy
+                               ? *trigger <= own->second.limit_price
+                               : *trigger >= own->second.limit_price;
+      if (!crossed) {
         break;
       }
+      const Quantity fill_quantity = own->second.remaining_quantity;
+      erase_resting(own->second);
+      own->second.remaining_quantity = 0;
+      fills_.push_back(SyntheticFill{own->second.client_order_id, *trigger,
+                                     fill_quantity, liquidity_source,
+                                     trigger_source_sequence});
+      view_.orders_.erase(own);
     }
   };
-  process(instrument->second.buys);
-  process(instrument->second.sells);
-}
-
-void SimulatedLOB::match(EngineView::PrivateOrder &order,
-                         const market::LimitOrderBook &book) {
-  erase_resting(order);
-  book.for_each_marketable_liquidity(
-      order.side, order.limit_price,
-      [&](const market::HistoricalOrderSlice &slice) {
-        const EngineView::ConsumptionKey key{order.instrument_id, slice.side,
-                                             slice.exchange_order_id,
-                                             slice.liquidity_revision};
-        const auto consumed = view_.consumption_.find(key);
-        const Quantity consumed_quantity =
-            consumed == view_.consumption_.end() ? 0 : consumed->second;
-        const Quantity available =
-            std::max<Quantity>(0, slice.remaining_quantity - consumed_quantity);
-        if (available == 0) {
-          return true;
-        }
-        const Quantity fill_quantity =
-            std::min(order.remaining_quantity, available);
-        view_.consumption_[key] = consumed_quantity + fill_quantity;
-        order.remaining_quantity -= fill_quantity;
-        fills_.push_back(
-            SyntheticFill{order.client_order_id, slice.price, fill_quantity});
-        return order.remaining_quantity != 0;
-      });
-  if (order.remaining_quantity != 0) {
-    insert_resting(order);
-  }
+  process(instrument->second.buys, buy_trigger, Side::Buy);
+  process(instrument->second.sells, sell_trigger, Side::Sell);
 }
 
 void SimulatedLOB::insert_resting(const EngineView::PrivateOrder &order) {

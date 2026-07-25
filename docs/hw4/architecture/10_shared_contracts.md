@@ -61,7 +61,8 @@ All enum result columns store the enum's fixed-width underlying value:
 | `EventPriority` | `uint8` | `MarketData=0`, `NewOrder=1`, `Cancel=2` |
 | `CommandType` | `uint8` | `NewOrder=0`, `Cancel=1` |
 | `OrderLogEventType` | `uint8` | `Submit=0`, `Accepted=1`, `Fill=2`, `CancelRequest=3`, `Cancelled=4`, `Reject=5` |
-| `LiquiditySource` | `uint8` | `HistoricalDisplayed=0` |
+| `LiquiditySource` | `uint8` | `HistoricalDisplayed=0`, `QuoteCross=1`, `TradeCross=2` |
+| `PriceCrossSource` | `uint8` | `BestQuote=0`, `Trade=1` |
 
 These encodings are public serialization/result contracts. Additions or changes
 require the decision-change process.
@@ -73,11 +74,24 @@ require the decision-change process.
 priority and stable ordering key are derived from the active variant, so a
 market payload cannot carry new-order or cancel priority.
 
-`MarketDelivery` owns only scalar metadata. Its optional book view and trade
-span are non-owning views into dispatcher-owned stable event/book storage. That
-storage must remain valid and unchanged from enqueue until the Trading Engine
-publishes `processed_seq` for the delivery. New-order and cancel alternatives
-own complete command values; no side table is part of the contract.
+`MarketDelivery` owns only scalar metadata. Its optional book view, trade span,
+and ordered `PriceCrossSignal` span are non-owning views into dispatcher-owned
+stable event/book storage. That storage must remain valid and unchanged from
+enqueue until the Trading Engine publishes `processed_seq` for the delivery.
+New-order and cancel alternatives own complete command values; no side table is
+part of the contract.
+
+Each price-cross signal carries one raw source sequence. A book action records
+the best bid/ask immediately after that action; a trade records its price.
+Signals are strictly source-sequence ordered and belong to the delivery's
+instrument and timestamps.
+
+`FillView.sequence` is the synthetic fill sequence. It is distinct from
+`FillView.trigger_source_sequence`, which is the raw quote/trade source row
+that won matching. `FillResultRow` and `fills_df` retain the same trigger
+sequence. For a quote already crossed when an order arrives,
+`trigger_source_sequence` is the latest raw book-action sequence retained by
+the historical book.
 
 A book callback fires after the complete atomic historical group (for example,
 Databento `F_LAST`) and only when the configured top-N view changed. The
@@ -85,7 +99,7 @@ default depth is 15; internal replay remains full L3.
 
 For one high-level market event, callback and state order is:
 
-1. match resting private orders against the stable historical book;
+1. replay raw quote/trade cross signals through `SimulatedLOB`;
 2. update order, position, and result state, then call `on_fill()`;
 3. call `on_trade()` in stable source order;
 4. call `on_book_update()` when the top-N view changed;

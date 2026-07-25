@@ -181,8 +181,10 @@ def test_real_submission_delayed_fill_state_and_bulk_results(tmp_path):
         def on_fill(self, fill):
             self.callbacks.append(("fill", fill.engine_ts_ns))
             assert fill.engine_ts_ns == 105
-            assert self.position(fill.instrument_id).net_quantity == 4
-            assert self.open_orders(fill.instrument_id)[0].remaining_quantity == 2
+            assert fill.liquidity_source == bt.LiquiditySource.QUOTE_CROSS
+            assert fill.trigger_source_sequence == 2
+            assert self.position(fill.instrument_id).net_quantity == 6
+            assert self.open_orders(fill.instrument_id) == []
 
     strategy = Buy()
     result = empty_strategy_run(
@@ -194,8 +196,10 @@ def test_real_submission_delayed_fill_state_and_bulk_results(tmp_path):
     assert strategy.callbacks == [("book", 100), ("fill", 105)]
     fills = result.fills_df
     orders = result.order_log_df
-    assert fills["quantity"].tolist() == [4]
-    assert fills["remaining_quantity"].tolist() == [2]
+    assert fills["quantity"].tolist() == [6]
+    assert fills["remaining_quantity"].tolist() == [0]
+    assert fills["liquidity_source"].tolist() == [1]
+    assert fills["trigger_source_sequence"].tolist() == [2]
     assert orders["event_type"].tolist() == [0, 1, 2]
     assert list(fills.columns) == [
         "exchange_ts_ns",
@@ -207,6 +211,7 @@ def test_real_submission_delayed_fill_state_and_bulk_results(tmp_path):
         "quantity",
         "remaining_quantity",
         "liquidity_source",
+        "trigger_source_sequence",
     ]
     assert fills.dtypes.astype(str).tolist() == [
         "int64",
@@ -218,6 +223,7 @@ def test_real_submission_delayed_fill_state_and_bulk_results(tmp_path):
         "int64",
         "int64",
         "uint8",
+        "uint64",
     ]
     assert result.pnl_series.index.dtype == np.dtype("int64")
     assert result.pnl_series.dtype == np.dtype("float64")
@@ -227,7 +233,7 @@ def test_real_submission_delayed_fill_state_and_bulk_results(tmp_path):
     assert type(retained.base.base).__name__ == "PyCapsule"
     del result, fills
     gc.collect()
-    assert retained.tolist() == [4]
+    assert retained.tolist() == [6]
 
 
 def test_three_argument_fallback_discovers_ids_and_uses_positive_latency(tmp_path):
@@ -438,6 +444,8 @@ def test_delivery_callback_order_is_fills_then_trades_then_book(tmp_path):
         def on_fill(self, fill):
             self.events.append(("fill", fill.sequence))
             self.fill_times.append((fill.exchange_ts_ns, fill.engine_ts_ns))
+            assert fill.liquidity_source == bt.LiquiditySource.QUOTE_CROSS
+            assert fill.trigger_source_sequence == 3
 
         def on_trade(self, trade):
             self.events.append(("trade", trade.sequence))
@@ -456,6 +464,71 @@ def test_delivery_callback_order_is_fills_then_trades_then_book(tmp_path):
         ("book", 4),
     ]
     assert strategy.fill_times == [(200, 200)]
+
+
+def test_trade_wins_when_it_precedes_quote_cross_in_atomic_group(tmp_path):
+    path = write_rows(
+        tmp_path,
+        [
+            row(1, side="B", price="99", size=8, flags=0, order_id=10),
+            row(2, side="A", price="102", size=4, order_id=11),
+            row(
+                3,
+                timestamp="1970-01-01T00:00:00.000000200Z",
+                action="T",
+                side="B",
+                price="101",
+                size=1,
+                flags=0,
+            ),
+            row(
+                4,
+                timestamp="1970-01-01T00:00:00.000000200Z",
+                action="M",
+                side="A",
+                price="101",
+                size=1,
+                order_id=11,
+            ),
+        ],
+    )
+
+    class Ordered(bt.Strategy):
+        def __init__(self):
+            super().__init__()
+            self.events = []
+
+        def on_book_update(self, update):
+            self.events.append(("book", update.sequence))
+            if update.sequence == 2:
+                self.submit_limit(1, bt.Side.BUY, 101_000_000_000, 25)
+
+        def on_fill(self, fill):
+            self.events.append(("fill", fill.liquidity_source))
+            assert fill.quantity == 25
+            assert fill.price == 101_000_000_000
+            assert fill.trigger_source_sequence == 3
+
+        def on_trade(self, trade):
+            self.events.append(("trade", trade.sequence))
+
+    strategy = Ordered()
+    result = empty_strategy_run(
+        path,
+        strategy,
+        config=bt.BacktestConfig(order_latency_ns=5, book_depth=1),
+        instruments=metadata(1),
+    )
+
+    assert strategy.events == [
+        ("book", 2),
+        ("fill", bt.LiquiditySource.TRADE_CROSS),
+        ("trade", 3),
+        ("book", 4),
+    ]
+    assert result.fills_df["quantity"].tolist() == [25]
+    assert result.fills_df["liquidity_source"].tolist() == [2]
+    assert result.fills_df["trigger_source_sequence"].tolist() == [3]
 
 
 def test_trade_only_empty_book_does_not_emit_initial_depth(tmp_path):
@@ -519,7 +592,7 @@ def test_callback_exception_stops_joins_rethrows_and_second_run(tmp_path, callba
             if callback == "book":
                 raise LookupError("exact callback failure")
             if callback == "fill":
-                self.submit_limit(1, bt.Side.BUY, 101_000_000_000, 1)
+                self.submit_limit(1, bt.Side.BUY, 100_000_000_000, 1)
             if callback == "reject":
                 self.submit_limit(999, bt.Side.BUY, 1, 1)
 
@@ -529,6 +602,8 @@ def test_callback_exception_stops_joins_rethrows_and_second_run(tmp_path, callba
 
         def on_fill(self, fill):
             if callback == "fill":
+                assert fill.liquidity_source == bt.LiquiditySource.TRADE_CROSS
+                assert fill.trigger_source_sequence == 3
                 raise LookupError("exact callback failure")
 
         def on_reject(self, reject):

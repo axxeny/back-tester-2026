@@ -107,6 +107,9 @@ public:
   [[nodiscard]] Sequence book_revision() const noexcept {
     return book_revision_;
   }
+  [[nodiscard]] Sequence last_book_source_sequence() const noexcept {
+    return last_book_source_sequence_;
+  }
 
   [[nodiscard]] std::uint64_t total_adds() const noexcept {
     return total_adds_;
@@ -177,6 +180,7 @@ private:
   Sequence revision_counter_{};
   Sequence liquidity_revision_counter_{};
   Sequence book_revision_{};
+  Sequence last_book_source_sequence_{};
   std::uint64_t total_adds_{};
   std::uint64_t total_cancels_{};
   std::uint64_t total_modifies_{};

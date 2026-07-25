@@ -51,6 +51,7 @@ public:
     bids_.reserve(config.book_depth);
     asks_.reserve(config.book_depth);
     trades_.reserve(8);
+    price_cross_signals_.reserve(8);
   }
 
   bool next(ScheduledEvent &scheduled) {
@@ -63,6 +64,7 @@ public:
     bids_.clear();
     asks_.clear();
     trades_.clear();
+    price_cross_signals_.clear();
 
     for (;;) {
       market::MarketDataEvent first;
@@ -111,6 +113,7 @@ public:
           group_.back().source_sequence,
           std::nullopt,
           {},
+          {},
       }};
       return true;
     }
@@ -143,6 +146,36 @@ public:
             event.side,
             event.price_ticks.value(),
             event.quantity,
+        });
+        price_cross_signals_.push_back(PriceCrossSignal{
+            event.instrument_id,
+            event.exchange_ts_ns,
+            staged->engine_ts_ns,
+            event.source_sequence,
+            PriceCrossSource::Trade,
+            std::nullopt,
+            std::nullopt,
+            event.price_ticks,
+        });
+      } else {
+        const auto *intermediate_book = books_.find(event.instrument_id);
+        if (intermediate_book == nullptr) {
+          throw std::logic_error(
+              "historical store lost intermediate instrument");
+        }
+        const auto best_bid = intermediate_book->best_bid();
+        const auto best_ask = intermediate_book->best_ask();
+        price_cross_signals_.push_back(PriceCrossSignal{
+            event.instrument_id,
+            event.exchange_ts_ns,
+            staged->engine_ts_ns,
+            event.source_sequence,
+            PriceCrossSource::BestQuote,
+            best_bid.has_value() ? std::optional<PriceTicks>{best_bid->price}
+                                 : std::nullopt,
+            best_ask.has_value() ? std::optional<PriceTicks>{best_ask->price}
+                                 : std::nullopt,
+            std::nullopt,
         });
       }
     }
@@ -180,6 +213,7 @@ public:
         staged->source_sequence,
         book_update,
         trades_,
+        price_cross_signals_,
     }};
     group_staged_ = false;
   }
@@ -215,6 +249,7 @@ private:
   std::vector<BookLevel> bids_;
   std::vector<BookLevel> asks_;
   std::vector<TradeView> trades_;
+  std::vector<PriceCrossSignal> price_cross_signals_;
   bool group_staged_{};
 };
 

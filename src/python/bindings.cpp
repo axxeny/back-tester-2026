@@ -188,6 +188,7 @@ public:
     values["remaining_quantity"] = array(columns.remaining_quantity);
     values["liquidity_source"] =
         enum_array<std::uint8_t>(columns.liquidity_source);
+    values["trigger_source_sequence"] = array(columns.trigger_source_sequence);
     return py::module_::import("pandas").attr("DataFrame")(
         values, py::arg("copy") = false);
   }
@@ -257,6 +258,10 @@ PYBIND11_MODULE(_backtester, module) {
       .value("SELL", cmf::Side::Sell)
       .value("NONE", cmf::Side::None)
       .value("BUY", cmf::Side::Buy);
+  py::enum_<cmf::LiquiditySource>(module, "LiquiditySource")
+      .value("HISTORICAL_DISPLAYED", cmf::LiquiditySource::HistoricalDisplayed)
+      .value("QUOTE_CROSS", cmf::LiquiditySource::QuoteCross)
+      .value("TRADE_CROSS", cmf::LiquiditySource::TradeCross);
   py::enum_<cmf::OrderState>(module, "OrderState")
       .value("PENDING_NEW", cmf::OrderState::PendingNew)
       .value("OPEN", cmf::OrderState::Open)
@@ -343,7 +348,10 @@ PYBIND11_MODULE(_backtester, module) {
       .def_readonly("remaining_quantity", &cmf::FillView::remaining_quantity)
       .def_readonly("exchange_ts_ns", &cmf::FillView::exchange_ts_ns)
       .def_readonly("engine_ts_ns", &cmf::FillView::engine_ts_ns)
-      .def_readonly("sequence", &cmf::FillView::fill_sequence);
+      .def_readonly("sequence", &cmf::FillView::fill_sequence)
+      .def_readonly("liquidity_source", &cmf::FillView::liquidity_source)
+      .def_readonly("trigger_source_sequence",
+                    &cmf::FillView::trigger_source_sequence);
   py::class_<cmf::RejectView>(module, "Reject")
       .def_readonly("instrument_id", &cmf::RejectView::instrument_id)
       .def_readonly("client_order_id", &cmf::RejectView::client_order_id)

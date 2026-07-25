@@ -75,6 +75,22 @@ BookUpdateView empty_book_view(TimestampNs time, Sequence seq) {
   return BookUpdateView{1, time, time, seq, false, {}, {}};
 }
 
+PriceCrossSignal quote_signal(TimestampNs time, Sequence seq,
+                              std::optional<PriceTicks> best_bid,
+                              std::optional<PriceTicks> best_ask,
+                              InstrumentId instrument_id = 1) {
+  return PriceCrossSignal{
+      instrument_id, time,     time,        seq, PriceCrossSource::BestQuote,
+      best_bid,      best_ask, std::nullopt};
+}
+
+PriceCrossSignal trade_signal(TimestampNs time, Sequence seq, PriceTicks price,
+                              InstrumentId instrument_id = 1) {
+  return PriceCrossSignal{
+      instrument_id,           time,         time,         seq,
+      PriceCrossSource::Trade, std::nullopt, std::nullopt, price};
+}
+
 const std::array<InstrumentMeta, 1> instruments{InstrumentMeta{1, 1, 100, 10}};
 
 } // namespace
@@ -113,7 +129,7 @@ TEST_CASE("Trading engine requires causal positive order latency",
   }
 }
 
-TEST_CASE("Real runtime delays order and sweeps multiple historical orders",
+TEST_CASE("Delayed order fully fills at best quote without volume cap",
           "[Trading]") {
   HistoricalLOBStore books;
   books.apply(market_event(1, 1, 101, MarketAction::Add, Side::Sell, 101, 4));
@@ -126,82 +142,169 @@ TEST_CASE("Real runtime delays order and sweeps multiple historical orders",
   const std::array<BookLevel, 1> asks{{BookLevel{101, 10}}};
   const BookUpdateView view{1, 100, 100, 3, false, {}, asks};
   const std::array events{
-      ScheduledEvent{MarketDelivery{1, 100, 100, 3, view, {}}}};
+      ScheduledEvent{MarketDelivery{1, 100, 100, 3, view, {}, {}}}};
   SchedulerRuntime runtime(SchedulerRuntimeConfig{DateRange{}, 1, 8, 16});
   runtime.run(events, engine);
 
   REQUIRE(strategy.order_id == 1);
-  REQUIRE(strategy.fills.size() == 2);
+  REQUIRE(strategy.fills.size() == 1);
   REQUIRE(strategy.fills[0].engine_ts_ns == 125);
   REQUIRE(strategy.fills[0].price == 101);
-  REQUIRE(strategy.fills[0].quantity == 4);
-  REQUIRE(strategy.fills[1].price == 102);
-  REQUIRE(strategy.fills[1].quantity == 6);
+  REQUIRE(strategy.fills[0].quantity == 10);
+  REQUIRE(strategy.fills[0].liquidity_source == LiquiditySource::QuoteCross);
+  REQUIRE(strategy.fills[0].trigger_source_sequence == 2);
+  REQUIRE(recorder.fills[0].liquidity_source == LiquiditySource::QuoteCross);
+  REQUIRE(recorder.fills[0].trigger_source_sequence == 2);
   REQUIRE(strategy.positions_in_fill.back().net_quantity == 10);
   REQUIRE(strategy.open_counts_in_fill.back() == 0);
   REQUIRE(runtime.processed_sequence() == 2);
 }
 
-TEST_CASE("Resting order fills later and private consumption tracks identity",
+TEST_CASE("Resting oversized order fully fills on the first quote cross",
           "[Trading]") {
   HistoricalLOBStore books;
   books.apply(market_event(1, 1, 50, MarketAction::Add, Side::Sell, 101, 5));
-  struct RevisionStrategy final : SubmitOnFirstMarket {
-    HistoricalLOBStore &books;
-    int callback{};
-
-    explicit RevisionStrategy(HistoricalLOBStore &store) : books(store) {
-      price = 100;
-      quantity = 8;
-    }
-
-    void on_book_update(const BookUpdateView &view,
-                        StrategyContext &context) override {
-      SubmitOnFirstMarket::on_book_update(view, context);
-      ++callback;
-      if (callback == 2) {
-        books.apply(
-            market_event(2, 200, 50, MarketAction::Modify, Side::Sell, 100, 3));
-      } else if (callback == 3) {
-        books.apply(
-            market_event(3, 300, 50, MarketAction::Fill, Side::Sell, 100, 1));
-      } else if (callback == 4) {
-        books.apply(
-            market_event(4, 400, 50, MarketAction::Cancel, Side::Sell, 100, 0));
-      } else if (callback == 5) {
-        books.apply(
-            market_event(5, 500, 50, MarketAction::Add, Side::Sell, 100, 6));
-      }
-    }
-  } strategy(books);
+  SubmitOnFirstMarket strategy;
+  strategy.price = 100;
+  strategy.quantity = 8;
   RecordingRecorder recorder;
   TradingEngine engine(instruments, BacktestConfig{0, 1, 1}, books, strategy,
                        recorder);
   const auto view100 = empty_book_view(100, 10);
   const auto view200 = empty_book_view(200, 20);
-  const auto view300 = empty_book_view(300, 30);
-  const auto view400 = empty_book_view(400, 40);
-  const auto view500 = empty_book_view(500, 50);
-  const auto view600 = empty_book_view(600, 60);
+  const std::array cross{quote_signal(200, 20, std::nullopt, 100)};
   const std::array events{
-      ScheduledEvent{MarketDelivery{1, 100, 100, 10, view100, {}}},
-      ScheduledEvent{MarketDelivery{1, 200, 200, 20, view200, {}}},
-      ScheduledEvent{MarketDelivery{1, 300, 300, 30, view300, {}}},
-      ScheduledEvent{MarketDelivery{1, 400, 400, 40, view400, {}}},
-      ScheduledEvent{MarketDelivery{1, 500, 500, 50, view500, {}}},
-      ScheduledEvent{MarketDelivery{1, 600, 600, 60, view600, {}}}};
+      ScheduledEvent{MarketDelivery{1, 100, 100, 10, view100, {}, {}}},
+      ScheduledEvent{MarketDelivery{1, 200, 200, 20, view200, {}, cross}}};
+  SchedulerRuntime runtime(SchedulerRuntimeConfig{DateRange{}, 1, 8, 16});
+  runtime.run(events, engine);
+
+  REQUIRE(strategy.fills.size() == 1);
+  REQUIRE(strategy.fills[0].quantity == 8);
+  REQUIRE(strategy.fills[0].engine_ts_ns == 200);
+  REQUIRE(strategy.fills[0].price == 100);
+  REQUIRE(strategy.fills[0].trigger_source_sequence == 20);
+  REQUIRE(engine.position(1).net_quantity == 8);
+}
+
+TEST_CASE("Only post-arrival same-instrument trade cross fully fills",
+          "[Trading]") {
+  HistoricalLOBStore books;
+  struct TradeStrategy final : SubmitOnFirstMarket {
+    std::vector<std::size_t> fills_before_trade;
+
+    TradeStrategy() {
+      price = 100;
+      quantity = 50;
+    }
+
+    void on_trade(const TradeView &, StrategyContext &) override {
+      fills_before_trade.push_back(fills.size());
+    }
+  } strategy;
+  RecordingRecorder recorder;
+  const std::array two_instruments{InstrumentMeta{1, 1, 100, 10},
+                                   InstrumentMeta{2, 1, 100, 10}};
+  TradingEngine engine(two_instruments, BacktestConfig{0, 5, 1}, books,
+                       strategy, recorder);
+
+  const auto initial_view = empty_book_view(100, 1);
+  const std::array early_trade{TradeView{1, 102, 102, 2, Side::Buy, 99, 1}};
+  const std::array early_signal{trade_signal(102, 2, 99)};
+  const std::array other_trade{TradeView{2, 106, 106, 3, Side::Sell, 99, 1}};
+  const std::array other_signal{trade_signal(106, 3, 99, 2)};
+  const std::array winning_trade{TradeView{1, 110, 110, 4, Side::None, 100, 1}};
+  const std::array winning_signal{trade_signal(110, 4, 100)};
+  const std::array events{
+      ScheduledEvent{MarketDelivery{1, 100, 100, 1, initial_view, {}, {}}},
+      ScheduledEvent{
+          MarketDelivery{1, 102, 102, 2, {}, early_trade, early_signal}},
+      ScheduledEvent{
+          MarketDelivery{2, 106, 106, 3, {}, other_trade, other_signal}},
+      ScheduledEvent{
+          MarketDelivery{1, 110, 110, 4, {}, winning_trade, winning_signal}}};
+  SchedulerRuntime runtime(SchedulerRuntimeConfig{DateRange{}, 1, 8, 16});
+  runtime.run(events, engine);
+
+  REQUIRE(strategy.fills.size() == 1);
+  REQUIRE(strategy.fills[0].quantity == 50);
+  REQUIRE(strategy.fills[0].price == 100);
+  REQUIRE(strategy.fills[0].engine_ts_ns == 110);
+  REQUIRE(strategy.fills[0].liquidity_source == LiquiditySource::TradeCross);
+  REQUIRE(strategy.fills[0].trigger_source_sequence == 4);
+  REQUIRE(strategy.fills_before_trade == std::vector<std::size_t>({0, 0, 1}));
+  REQUIRE(engine.position(1).net_quantity == 50);
+  REQUIRE(engine.position(2).net_quantity == 0);
+  REQUIRE(recorder.fills[0].liquidity_source == LiquiditySource::TradeCross);
+  REQUIRE(recorder.fills[0].trigger_source_sequence == 4);
+}
+
+TEST_CASE(
+    "Post-arrival same-instrument non-crossing quote and trade do not fill",
+    "[Trading]") {
+  HistoricalLOBStore books;
+  SubmitOnFirstMarket strategy;
+  strategy.price = 100;
+  strategy.quantity = 9;
+  RecordingRecorder recorder;
+  TradingEngine engine(instruments, BacktestConfig{0, 5, 1}, books, strategy,
+                       recorder);
+
+  const auto initial = empty_book_view(100, 1);
+  const auto later = empty_book_view(120, 3);
+  const std::array quote{quote_signal(110, 2, std::nullopt, 101)};
+  const std::array trade{trade_signal(120, 3, 101)};
+  const std::array events{
+      ScheduledEvent{MarketDelivery{1, 100, 100, 1, initial, {}, {}}},
+      ScheduledEvent{MarketDelivery{1, 110, 110, 2, {}, {}, quote}},
+      ScheduledEvent{MarketDelivery{1, 120, 120, 3, later, {}, trade}}};
+  SchedulerRuntime runtime(SchedulerRuntimeConfig{DateRange{}, 1, 8, 16});
+  runtime.run(events, engine);
+
+  REQUIRE(strategy.fills.empty());
+  REQUIRE(recorder.fills.empty());
+  const auto open = engine.open_orders(1);
+  REQUIRE(open.size() == 1);
+  REQUIRE(open[0].state == OrderState::Open);
+  REQUIRE(open[0].remaining_quantity == 9);
+}
+
+TEST_CASE("Own price priority precedes arrival FIFO across different prices",
+          "[Trading]") {
+  HistoricalLOBStore books;
+  struct TwoPrices final : RecordingStrategy {
+    std::array<ClOrdId, 2> ids{};
+    bool submitted{};
+
+    void on_book_update(const BookUpdateView &,
+                        StrategyContext &context) override {
+      if (!submitted) {
+        submitted = true;
+        ids[0] = context.submit_limit(1, Side::Buy, 99, 1);
+        ids[1] = context.submit_limit(1, Side::Buy, 100, 1);
+      }
+    }
+  } strategy;
+  RecordingRecorder recorder;
+  TradingEngine engine(instruments, BacktestConfig{0, 5, 1}, books, strategy,
+                       recorder);
+
+  const auto initial = empty_book_view(100, 1);
+  const std::array cross{quote_signal(110, 2, std::nullopt, 99)};
+  const std::array events{
+      ScheduledEvent{MarketDelivery{1, 100, 100, 1, initial, {}, {}}},
+      ScheduledEvent{MarketDelivery{1, 110, 110, 2, {}, {}, cross}}};
   SchedulerRuntime runtime(SchedulerRuntimeConfig{DateRange{}, 1, 8, 16});
   runtime.run(events, engine);
 
   REQUIRE(strategy.fills.size() == 2);
-  REQUIRE(strategy.fills[0].quantity == 3);
-  REQUIRE(strategy.fills[0].engine_ts_ns == 300);
-  REQUIRE(strategy.fills[1].quantity == 5);
-  REQUIRE(strategy.fills[1].engine_ts_ns == 600);
-  REQUIRE(engine.position(1).net_quantity == 8);
+  REQUIRE(strategy.fills[0].client_order_id == strategy.ids[1]);
+  REQUIRE(strategy.fills[1].client_order_id == strategy.ids[0]);
+  REQUIRE(strategy.fills[0].trigger_source_sequence == 2);
+  REQUIRE(strategy.fills[1].trigger_source_sequence == 2);
 }
 
-TEST_CASE("Own orders use price-time priority and EngineViews stay isolated",
+TEST_CASE("Infinite quote liquidity fills every own order and isolated view",
           "[Trading]") {
   HistoricalLOBStore books;
   books.apply(market_event(1, 1, 90, MarketAction::Add, Side::Sell, 101, 3));
@@ -226,7 +329,7 @@ TEST_CASE("Own orders use price-time priority and EngineViews stay isolated",
                               second, second_recorder);
   const auto view = empty_book_view(100, 2);
   const std::array events{
-      ScheduledEvent{MarketDelivery{1, 100, 100, 2, view, {}}}};
+      ScheduledEvent{MarketDelivery{1, 100, 100, 2, view, {}, {}}}};
   SchedulerRuntime first_runtime(SchedulerRuntimeConfig{DateRange{}, 1, 8, 16});
   SchedulerRuntime second_runtime(
       SchedulerRuntimeConfig{DateRange{}, 1, 8, 16});
@@ -237,22 +340,19 @@ TEST_CASE("Own orders use price-time priority and EngineViews stay isolated",
   REQUIRE(first.fills[0].client_order_id == first.ids[0]);
   REQUIRE(first.fills[0].quantity == 2);
   REQUIRE(first.fills[1].client_order_id == first.ids[1]);
-  REQUIRE(first.fills[1].quantity == 1);
+  REQUIRE(first.fills[1].quantity == 2);
   REQUIRE(second.fills.size() == 2);
-  REQUIRE(second_engine.position(1).net_quantity == 3);
+  REQUIRE(second_engine.position(1).net_quantity == 4);
 }
 
 TEST_CASE("Cancel is delayed and equal-time market fill wins", "[Trading]") {
   HistoricalLOBStore books;
   books.apply(market_event(1, 1, 70, MarketAction::Add, Side::Sell, 101, 2));
   struct CancelStrategy final : RecordingStrategy {
-    HistoricalLOBStore &books;
     ClOrdId id{};
     ClOrdId replacement_id{};
     int callbacks{};
     std::size_t fills_seen_in_reject{};
-
-    explicit CancelStrategy(HistoricalLOBStore &store) : books(store) {}
 
     void on_book_update(const BookUpdateView &,
                         StrategyContext &context) override {
@@ -261,8 +361,6 @@ TEST_CASE("Cancel is delayed and equal-time market fill wins", "[Trading]") {
         id = context.submit_limit(1, Side::Buy, 100, 2);
       } else if (callbacks == 2) {
         REQUIRE(context.cancel_order(id));
-        books.apply(
-            market_event(2, 111, 70, MarketAction::Modify, Side::Sell, 100, 2));
       }
     }
 
@@ -270,21 +368,23 @@ TEST_CASE("Cancel is delayed and equal-time market fill wins", "[Trading]") {
                    StrategyContext &context) override {
       RecordingStrategy::on_reject(reject, context);
       fills_seen_in_reject = fills.size();
-      books.apply(
-          market_event(3, 121, 71, MarketAction::Add, Side::Sell, 100, 1));
       replacement_id = context.submit_limit(1, Side::Buy, 100, 1);
     }
-  } strategy(books);
+  } strategy;
   RecordingRecorder recorder;
   TradingEngine engine(instruments, BacktestConfig{0, 10, 1}, books, strategy,
                        recorder);
   const auto view100 = empty_book_view(100, 10);
   const auto view111 = empty_book_view(111, 11);
   const auto view121 = empty_book_view(121, 12);
+  const auto view140 = empty_book_view(140, 13);
+  const std::array cross121{quote_signal(121, 12, std::nullopt, 100)};
+  const std::array cross140{quote_signal(140, 13, std::nullopt, 100)};
   const std::array events{
-      ScheduledEvent{MarketDelivery{1, 100, 100, 10, view100, {}}},
-      ScheduledEvent{MarketDelivery{1, 111, 111, 11, view111, {}}},
-      ScheduledEvent{MarketDelivery{1, 121, 121, 12, view121, {}}}};
+      ScheduledEvent{MarketDelivery{1, 100, 100, 10, view100, {}, {}}},
+      ScheduledEvent{MarketDelivery{1, 111, 111, 11, view111, {}, {}}},
+      ScheduledEvent{MarketDelivery{1, 121, 121, 12, view121, {}, cross121}},
+      ScheduledEvent{MarketDelivery{1, 140, 140, 13, view140, {}, cross140}}};
   SchedulerRuntime runtime(SchedulerRuntimeConfig{DateRange{}, 1, 8, 16});
   runtime.run(events, engine);
 
@@ -294,9 +394,47 @@ TEST_CASE("Cancel is delayed and equal-time market fill wins", "[Trading]") {
   REQUIRE(strategy.fills_seen_in_reject == 1);
   REQUIRE(strategy.replacement_id == 2);
   REQUIRE(strategy.fills[1].client_order_id == strategy.replacement_id);
-  REQUIRE(strategy.fills[1].engine_ts_ns == 131);
+  REQUIRE(strategy.fills[1].engine_ts_ns == 140);
   REQUIRE(strategy.rejects.size() == 1);
   REQUIRE(strategy.rejects[0].reason == RejectReason::AlreadyTerminal);
+}
+
+TEST_CASE("Cancel arriving before a later price cross prevents fill",
+          "[Trading]") {
+  HistoricalLOBStore books;
+  struct CancelBeforeCross final : RecordingStrategy {
+    ClOrdId id{};
+    int callbacks{};
+
+    void on_book_update(const BookUpdateView &,
+                        StrategyContext &context) override {
+      ++callbacks;
+      if (callbacks == 1) {
+        id = context.submit_limit(1, Side::Buy, 100, 3);
+      } else if (callbacks == 2) {
+        REQUIRE(context.cancel_order(id));
+      }
+    }
+  } strategy;
+  RecordingRecorder recorder;
+  TradingEngine engine(instruments, BacktestConfig{0, 5, 1}, books, strategy,
+                       recorder);
+
+  const auto view100 = empty_book_view(100, 1);
+  const auto view110 = empty_book_view(110, 2);
+  const std::array later_cross{quote_signal(120, 3, std::nullopt, 100)};
+  const std::array events{
+      ScheduledEvent{MarketDelivery{1, 100, 100, 1, view100, {}, {}}},
+      ScheduledEvent{MarketDelivery{1, 110, 110, 2, view110, {}, {}}},
+      ScheduledEvent{MarketDelivery{1, 120, 120, 3, {}, {}, later_cross}}};
+  SchedulerRuntime runtime(SchedulerRuntimeConfig{DateRange{}, 1, 8, 16});
+  runtime.run(events, engine);
+
+  REQUIRE(strategy.fills.empty());
+  REQUIRE(recorder.fills.empty());
+  REQUIRE(engine.open_orders(1).empty());
+  REQUIRE(recorder.orders.back().event_type == OrderLogEventType::Cancelled);
+  REQUIRE(recorder.orders.back().state == OrderState::Cancelled);
 }
 
 TEST_CASE("Invalid orders and unknown cancels reject deterministically",
@@ -343,7 +481,7 @@ TEST_CASE("Invalid orders and unknown cancels reject deterministically",
                        recorder);
   const auto view = empty_book_view(100, 1);
   const std::array events{
-      ScheduledEvent{MarketDelivery{1, 100, 100, 1, view, {}}}};
+      ScheduledEvent{MarketDelivery{1, 100, 100, 1, view, {}, {}}}};
   SchedulerRuntime runtime(SchedulerRuntimeConfig{DateRange{}, 1, 8, 16});
   runtime.run(events, engine);
 
@@ -362,8 +500,7 @@ TEST_CASE("Invalid orders and unknown cancels reject deterministically",
                                     "reject"}));
 }
 
-TEST_CASE("Sell sweep respects limit and leaves only protected remainder",
-          "[Trading]") {
+TEST_CASE("Sell fully fills at best bid without volume cap", "[Trading]") {
   HistoricalLOBStore books;
   books.apply(market_event(1, 1, 81, MarketAction::Add, Side::Buy, 100, 2));
   books.apply(market_event(2, 2, 82, MarketAction::Add, Side::Buy, 99, 4));
@@ -377,19 +514,16 @@ TEST_CASE("Sell sweep respects limit and leaves only protected remainder",
                        recorder);
   const auto view = empty_book_view(100, 4);
   const std::array events{
-      ScheduledEvent{MarketDelivery{1, 100, 100, 4, view, {}}}};
+      ScheduledEvent{MarketDelivery{1, 100, 100, 4, view, {}, {}}}};
   SchedulerRuntime runtime(SchedulerRuntimeConfig{DateRange{}, 1, 8, 16});
   runtime.run(events, engine);
 
-  REQUIRE(strategy.fills.size() == 2);
+  REQUIRE(strategy.fills.size() == 1);
   REQUIRE(strategy.fills[0].price == 100);
-  REQUIRE(strategy.fills[0].quantity == 2);
-  REQUIRE(strategy.fills[1].price == 99);
-  REQUIRE(strategy.fills[1].quantity == 4);
-  const auto open = engine.open_orders(1);
-  REQUIRE(open.size() == 1);
-  REQUIRE(open[0].remaining_quantity == 2);
-  REQUIRE(engine.position(1).net_quantity == -6);
+  REQUIRE(strategy.fills[0].quantity == 8);
+  REQUIRE(strategy.fills[0].liquidity_source == LiquiditySource::QuoteCross);
+  REQUIRE(engine.open_orders(1).empty());
+  REQUIRE(engine.position(1).net_quantity == -8);
 }
 
 TEST_CASE("Commands are globally monotonic and normal cancel is terminal",
@@ -418,8 +552,8 @@ TEST_CASE("Commands are globally monotonic and normal cancel is terminal",
   const auto view100 = empty_book_view(100, 1);
   const auto view110 = empty_book_view(110, 2);
   const std::array events{
-      ScheduledEvent{MarketDelivery{1, 100, 100, 1, view100, {}}},
-      ScheduledEvent{MarketDelivery{1, 110, 110, 2, view110, {}}}};
+      ScheduledEvent{MarketDelivery{1, 100, 100, 1, view100, {}, {}}},
+      ScheduledEvent{MarketDelivery{1, 110, 110, 2, view110, {}, {}}}};
   std::vector<Sequence> command_sequences;
   SchedulerRuntime runtime(SchedulerRuntimeConfig{DateRange{}, 1, 8, 16});
   runtime.run(events, [&](const ScheduledEvent &event, CommandSink &commands) {
@@ -499,7 +633,7 @@ TEST_CASE("Twenty scripted trading runs are deterministic", "[Trading]") {
                          recorder);
     const auto view = empty_book_view(100, 3);
     const std::array events{
-        ScheduledEvent{MarketDelivery{1, 100, 100, 3, view, {}}}};
+        ScheduledEvent{MarketDelivery{1, 100, 100, 3, view, {}, {}}}};
     SchedulerRuntime runtime(SchedulerRuntimeConfig{DateRange{}, 1, 8, 16});
     runtime.run(events, engine);
 

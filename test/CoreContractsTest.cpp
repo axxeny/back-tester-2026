@@ -61,6 +61,8 @@ static_assert(
     std::is_same_v<std::underlying_type_t<OrderLogEventType>, std::uint8_t>);
 static_assert(
     std::is_same_v<std::underlying_type_t<LiquiditySource>, std::uint8_t>);
+static_assert(
+    std::is_same_v<std::underlying_type_t<PriceCrossSource>, std::uint8_t>);
 
 static_assert(encoded(Side::Sell) == -1);
 static_assert(encoded(Side::None) == 0);
@@ -95,11 +97,16 @@ static_assert(encoded(OrderLogEventType::CancelRequest) == 3);
 static_assert(encoded(OrderLogEventType::Cancelled) == 4);
 static_assert(encoded(OrderLogEventType::Reject) == 5);
 static_assert(encoded(LiquiditySource::HistoricalDisplayed) == 0);
+static_assert(encoded(LiquiditySource::QuoteCross) == 1);
+static_assert(encoded(LiquiditySource::TradeCross) == 2);
+static_assert(encoded(PriceCrossSource::BestQuote) == 0);
+static_assert(encoded(PriceCrossSource::Trade) == 1);
 
 static_assert(std::is_trivially_copyable_v<BookLevel>);
 static_assert(std::is_trivially_copyable_v<AccountCurrencyAmount>);
 static_assert(std::is_trivially_copyable_v<BookUpdateView>);
 static_assert(std::is_trivially_copyable_v<TradeView>);
+static_assert(std::is_trivially_copyable_v<PriceCrossSignal>);
 static_assert(std::is_trivially_copyable_v<FillView>);
 static_assert(std::is_trivially_copyable_v<RejectView>);
 static_assert(std::is_trivially_copyable_v<NewOrderCommand>);
@@ -118,6 +125,7 @@ static_assert(std::is_aggregate_v<BacktestConfig>);
 static_assert(std::is_aggregate_v<DateRange>);
 static_assert(std::is_aggregate_v<BookUpdateView>);
 static_assert(std::is_aggregate_v<TradeView>);
+static_assert(std::is_aggregate_v<PriceCrossSignal>);
 static_assert(std::is_aggregate_v<FillView>);
 static_assert(std::is_aggregate_v<RejectView>);
 static_assert(std::is_aggregate_v<NewOrderCommand>);
@@ -144,6 +152,8 @@ static_assert(
     std::is_same_v<decltype(FillResultRow::remaining_quantity), Quantity>);
 static_assert(
     std::is_same_v<decltype(FillResultRow::liquidity_source), LiquiditySource>);
+static_assert(
+    std::is_same_v<decltype(FillResultRow::trigger_source_sequence), Sequence>);
 
 static_assert(
     std::is_same_v<decltype(OrderLogResultRow::engine_ts_ns), TimestampNs>);
@@ -226,15 +236,21 @@ TEST_CASE("Core contracts - scheduled payloads round trip", "[CoreContracts]") {
       {7, 1'000, 1'075, 31, Side::Buy, 101, 2},
       {7, 1'001, 1'075, 32, Side::Sell, 100, 3},
   }};
+  const std::array<PriceCrossSignal, 2> signals{{
+      {7, 1'000, 1'075, 31, PriceCrossSource::BestQuote, 100, 101,
+       std::nullopt},
+      {7, 1'001, 1'075, 32, PriceCrossSource::Trade, std::nullopt, std::nullopt,
+       100},
+  }};
   const BookUpdateView book{7, 1'001, 1'075, 33, false, bids, asks};
-  const MarketDelivery delivery{7, 1'001, 1'075, 30, book, trades};
+  const MarketDelivery delivery{7, 1'001, 1'075, 33, book, trades, signals};
   const NewOrderCommand new_order{41, 7, Side::Buy, 101, 5, 1'050, 1'075, 40};
   const CancelCommand cancel{41, 7, 1'060, 1'075, 50};
 
   const ScheduledEvent market_event{delivery, 101};
   const ScheduledEvent new_event{new_order, 102};
   const ScheduledEvent cancel_event{cancel, 103};
-  const ScheduledKey expected_market_key{1'075, EventPriority::MarketData, 30};
+  const ScheduledKey expected_market_key{1'075, EventPriority::MarketData, 33};
   const ScheduledKey expected_new_key{1'075, EventPriority::NewOrder, 40};
   const ScheduledKey expected_cancel_key{1'075, EventPriority::Cancel, 50};
 
@@ -273,6 +289,16 @@ TEST_CASE("Core contracts - scheduled payloads round trip", "[CoreContracts]") {
   REQUIRE(market_payload.trades[0].price == trades[0].price);
   REQUIRE(market_payload.trades[0].quantity == trades[0].quantity);
   REQUIRE(market_payload.trades[1].sequence == trades[1].sequence);
+  REQUIRE(market_payload.price_cross_signals.data() == signals.data());
+  REQUIRE(market_payload.price_cross_signals.size() == signals.size());
+  REQUIRE(market_payload.price_cross_signals[0].source ==
+          PriceCrossSource::BestQuote);
+  REQUIRE(market_payload.price_cross_signals[0].best_bid == 100);
+  REQUIRE(market_payload.price_cross_signals[0].best_ask == 101);
+  REQUIRE_FALSE(market_payload.price_cross_signals[0].trade_price.has_value());
+  REQUIRE(market_payload.price_cross_signals[1].source ==
+          PriceCrossSource::Trade);
+  REQUIRE(market_payload.price_cross_signals[1].trade_price == 100);
 
   const auto &new_payload = std::get<NewOrderCommand>(new_event.payload());
   REQUIRE(new_payload.client_order_id == new_order.client_order_id);
@@ -307,7 +333,9 @@ TEST_CASE("Core contracts - callback and command aggregates",
   const std::array<BookLevel, 1> asks{{{101, 6}}};
   const BookUpdateView book{7, 1'000, 1'050, 11, true, bids, asks};
   const TradeView trade{7, 1'001, 1'051, 12, Side::Buy, 101, 2};
-  const FillView fill{7, 41, Side::Buy, 101, 2, 3, 1'002, 1'052, 13};
+  const FillView fill{7, 41,    Side::Buy, 101, 2,
+                      3, 1'002, 1'052,     13,  LiquiditySource::TradeCross,
+                      12};
   const RejectView reject{7, 42, RejectReason::InvalidPrice, 1'003, 1'053, 14};
   const NewOrderCommand new_order{41, 7, Side::Buy, 101, 5, 1'050, 1'075, 21};
   const CancelCommand cancel{41, 7, 1'060, 1'085, 22};
@@ -325,6 +353,8 @@ TEST_CASE("Core contracts - callback and command aggregates",
   REQUIRE(fill.exchange_ts_ns == 1'002);
   REQUIRE(fill.engine_ts_ns == 1'052);
   REQUIRE(fill.fill_sequence == 13);
+  REQUIRE(fill.liquidity_source == LiquiditySource::TradeCross);
+  REQUIRE(fill.trigger_source_sequence == 12);
   REQUIRE(reject.instrument_id == 7);
   REQUIRE(reject.exchange_ts_ns == 1'003);
   REQUIRE(reject.engine_ts_ns == 1'053);
@@ -351,7 +381,8 @@ TEST_CASE("Core contracts - remaining value aggregates", "[CoreContracts]") {
   const FillResultRow fill_result{
       1'075, 1'075,     7,
       41,    Side::Buy, 101,
-      2,     3,         LiquiditySource::HistoricalDisplayed};
+      2,     3,         LiquiditySource::HistoricalDisplayed,
+      72};
   const OrderLogResultRow order_log{1'075,
                                     7,
                                     41,
@@ -377,6 +408,7 @@ TEST_CASE("Core contracts - remaining value aggregates", "[CoreContracts]") {
   REQUIRE(order.remaining_quantity == 3);
   REQUIRE(position.net_quantity == 2);
   REQUIRE(fill_result.liquidity_source == LiquiditySource::HistoricalDisplayed);
+  REQUIRE(fill_result.trigger_source_sequence == 72);
   REQUIRE(order_log.event_type == OrderLogEventType::Fill);
   REQUIRE(pnl.total_pnl == 4.0);
 }

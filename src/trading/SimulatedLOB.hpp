@@ -21,10 +21,12 @@ struct SyntheticFill {
   ClOrdId client_order_id{};
   PriceTicks price{};
   Quantity quantity{};
+  LiquiditySource liquidity_source{LiquiditySource::HistoricalDisplayed};
+  Sequence trigger_source_sequence{};
 };
 
-// The typed private overlay. It owns only this engine's resting orders and
-// historical consumption; the shared HistoricalLOB remains immutable here.
+// The typed private overlay. It owns only this engine's resting orders; the
+// shared HistoricalLOB remains immutable here.
 class EngineView {
 public:
   explicit EngineView(std::span<const InstrumentMeta> instruments);
@@ -57,21 +59,9 @@ private:
     std::map<RestingKey, ClOrdId, BuyFirst> buys;
     std::map<RestingKey, ClOrdId, SellFirst> sells;
   };
-  struct ConsumptionKey {
-    InstrumentId instrument_id{};
-    Side historical_side{Side::None};
-    ExchangeOrderId exchange_order_id{};
-    Sequence liquidity_revision{};
-
-    bool operator==(const ConsumptionKey &) const = default;
-  };
-  struct ConsumptionHash {
-    std::size_t operator()(const ConsumptionKey &key) const noexcept;
-  };
 
   std::unordered_map<ClOrdId, PrivateOrder> orders_;
   std::unordered_map<InstrumentId, InstrumentOrders> resting_;
-  std::unordered_map<ConsumptionKey, Quantity, ConsumptionHash> consumption_;
 };
 
 // The sole synthetic-fill authority. TradingEngine supplies accepted/cancelled
@@ -81,7 +71,7 @@ public:
   explicit SimulatedLOB(std::span<const InstrumentMeta> instruments);
 
   // Returned spans alias this SimulatedLOB's internal fill buffer. Their
-  // elements remain valid only until the next accept() or on_market() call on
+  // elements remain valid only until the next accept() or on_signal() call on
   // this instance, or until this instance is moved from or destroyed,
   // whichever comes first. cancel() does not invalidate them. Callers must
   // consume the elements synchronously and must not retain the span.
@@ -91,17 +81,18 @@ public:
          Sequence arrival_sequence, const market::LimitOrderBook *book);
 
   [[nodiscard]] std::span<const SyntheticFill>
-  on_market(InstrumentId instrument_id, const market::LimitOrderBook &book);
+  on_signal(const PriceCrossSignal &signal);
 
   void cancel(ClOrdId client_order_id);
 
   [[nodiscard]] const EngineView &engine_view() const noexcept { return view_; }
 
 private:
-  void reevaluate(InstrumentId instrument_id,
-                  const market::LimitOrderBook &book);
-  void match(EngineView::PrivateOrder &order,
-             const market::LimitOrderBook &book);
+  void match_prices(InstrumentId instrument_id,
+                    std::optional<PriceTicks> buy_trigger,
+                    std::optional<PriceTicks> sell_trigger,
+                    LiquiditySource liquidity_source,
+                    Sequence trigger_source_sequence);
   void insert_resting(const EngineView::PrivateOrder &order);
   void erase_resting(const EngineView::PrivateOrder &order);
 

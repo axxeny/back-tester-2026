@@ -53,12 +53,29 @@ it may not change the key or priority. Thus a command ordered before a
 prefetched market group sees the old book, while equal-time market data still
 wins by the standard priority rule.
 
-A `Trade` callback may be published in the same high-level engine event as a book update. The callback order is:
+While applying the group row by row, preparation also materializes an ordered
+`PriceCrossSignal` span:
 
-1. re-evaluate resting own orders against the newly stable historical book;
-2. update order state/position and emit `on_fill()` callbacks;
+- every book-mutating row contributes the best bid/ask visible immediately
+  after that row;
+- every trade row contributes its trade price;
+- every signal retains the raw source sequence and group timestamps.
+
+The Trading Engine replays that span in raw source order. The first qualifying
+signal fills an eligible order, so a trade before a quote transition can win
+inside one atomic group and vice versa. Historical quote/trade size is not part
+of the predicate or fill quantity. The winning raw source sequence is copied
+into `SyntheticFill`, `FillView`, and `FillResultRow`; it is distinct from the
+synthetic fill sequence.
+
+A `Trade` callback may be published in the same high-level engine event as a
+book update. The callback order is:
+
+1. replay ordered price-cross signals through `SimulatedLOB`;
+2. update order state/position and emit `on_fill()` immediately for each
+   winning signal;
 3. emit `on_trade()` for source trade records in stable source order;
-4. emit `on_book_update()` if top-N changed;
+4. emit `on_book_update()` for the final stable top-N book if it changed;
 5. process strategy submissions into the command ring;
 6. publish `processed_seq`.
 

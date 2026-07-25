@@ -45,8 +45,7 @@ trading thread is reacting to the current delivery.
 4. [`04_event_time_and_concurrency.md`](04_event_time_and_concurrency.md) —
    virtual time, stable ordering, queues, ready barrier, and shutdown.
 5. [`05_order_matching_and_state.md`](05_order_matching_and_state.md) —
-   fill-at-touch matching, private liquidity consumption, order lifecycle, and
-   positions.
+   full-fill-on-price-cross matching, order lifecycle, and positions.
 6. [`06_python_api_and_results.md`](06_python_api_and_results.md) — pybind11
    boundary, Strategy API, GIL rules, result schemas, and ownership.
 7. [`07_performance.md`](07_performance.md) — hot-path design and the two

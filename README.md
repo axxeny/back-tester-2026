@@ -12,7 +12,7 @@ MBO JSONL -> historical L3 books -> chronological scheduler
 
 The runtime is deterministic and multi-instrument. It uses one dispatcher
 thread, one trading thread, fixed market-data/order latency, an atomic processed
-sequence barrier, displayed-depth fill-at-touch matching, and bulk
+sequence barrier, full-fill-on-price-cross matching, and bulk
 NumPy/pandas result hand-off.
 
 - [New contributor guide](docs/hw4/GETTING_STARTED.md)
@@ -106,16 +106,19 @@ uv run pytest -q python/tests
 uv run python examples/mean_reversion.py
 ```
 
-Run the two required benchmarks only from that Release setup:
+Run the required benchmarks only from that Release setup:
 
 ```bash
 build-release/bin/test/back-tester-scheduler-benchmark
+build-release/bin/test/back-tester-price-cross-benchmark
 uv run python python/benchmarks/callback_overhead.py
 ```
 
 The scheduler benchmark reports warmed dispatcher-to-consumer round trips,
 including ring capacity, waiting strategy, build/compiler/platform metadata,
-and min/mean/p50/p95/p99. The Python benchmark reports 20 warmed samples of
+and min/mean/p50/p95/p99. The price-cross benchmark reports construction and
+native replay cost for 8- and 64-signal groups, including trigger-buffer
+reallocations. The Python benchmark reports 20 warmed samples of
 exactly 1,000 no-op callbacks for top-1 and top-15 payloads. A synthetic empty
 native loop is not reported because the Release compiler elides it; callback
 totals remain unadjusted. Parsing, process startup, logging, and DataFrame
@@ -145,9 +148,10 @@ A missing or unreadable path exits with status 2.
 
 ## Model limitations
 
-- Synthetic fills optimistically consume displayed historical liquidity at or
-  through the limit. Historical queue position, market impact, probabilistic
-  passive fills, slippage, and source-book mutation are not modeled.
+- A same-instrument best quote or trade price crossing the limit fills the
+  complete remaining order at the trigger price. Historical quote/trade size,
+  queue position, market impact, probabilistic passive fills, slippage, and
+  source-book mutation are not modeled.
 - The mandatory runtime uses one process, one dispatcher, and one EngineView
   with deterministic fixed latency. Multi-engine simulation is only an
   extension point.

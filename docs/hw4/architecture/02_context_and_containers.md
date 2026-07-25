@@ -84,7 +84,7 @@ the GIL only while calling a Python strategy method.
 | Event ring | Dispatcher producer | Trading consumer |
 | Command ring | Trading producer | Dispatcher consumer |
 | Virtual clock and private orders | Trading thread | Strategy during an active callback |
-| Positions and private consumption | Trading thread | Strategy during an active callback |
+| Positions and private resting orders | Trading thread | Strategy during an active callback |
 | Mutable result recorder | Trading thread | Runtime marking code executes in the same consumer callback |
 | Frozen result storage | No writers after `freeze()` | Python arrays/DataFrames |
 | Python Strategy object | Python owns lifetime | Trading thread invokes it while holding the GIL |

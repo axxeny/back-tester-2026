@@ -30,7 +30,8 @@ FillResultRow fill(TimestampNs time, InstrumentId instrument_id,
   return FillResultRow{
       time - 1, time,      instrument_id,
       order_id, side,      price,
-      quantity, remaining, LiquiditySource::HistoricalDisplayed};
+      quantity, remaining, LiquiditySource::HistoricalDisplayed,
+      17};
 }
 
 OrderLogResultRow order_event(TimestampNs time, OrderLogEventType event_type,
@@ -82,6 +83,7 @@ TEST_CASE("Result columns preserve every frozen field and equal lengths",
   REQUIRE(fills.quantity.size() == fills.size());
   REQUIRE(fills.remaining_quantity.size() == fills.size());
   REQUIRE(fills.liquidity_source.size() == fills.size());
+  REQUIRE(fills.trigger_source_sequence.size() == fills.size());
   REQUIRE(fills.exchange_ts_ns[0] == 101);
   REQUIRE(fills.engine_ts_ns[0] == 102);
   REQUIRE(fills.instrument_id[0] == 7);
@@ -91,6 +93,7 @@ TEST_CASE("Result columns preserve every frozen field and equal lengths",
   REQUIRE(fills.quantity[0] == 4);
   REQUIRE(fills.remaining_quantity[0] == 6);
   REQUIRE(fills.liquidity_source[0] == LiquiditySource::HistoricalDisplayed);
+  REQUIRE(fills.trigger_source_sequence[0] == 17);
 
   const auto orders = result.order_log();
   REQUIRE(orders.size() == 3);

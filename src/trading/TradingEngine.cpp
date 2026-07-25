@@ -221,10 +221,20 @@ void TradingEngine::process_market(const MarketDelivery &delivery) {
   if (find_instrument(delivery.instrument_id) == nullptr) {
     throw TradingError("market delivery references unknown instrument");
   }
-  const auto *book = books_.find(delivery.instrument_id);
-  if (book != nullptr) {
-    apply_fills(simulated_lob_.on_market(delivery.instrument_id, *book),
-                delivery.exchange_ts_ns);
+  Sequence previous_signal_sequence{};
+  bool have_previous_signal{};
+  for (const auto &signal : delivery.price_cross_signals) {
+    if (signal.instrument_id != delivery.instrument_id ||
+        signal.exchange_ts_ns != delivery.exchange_ts_ns ||
+        signal.engine_ts_ns != delivery.engine_ts_ns ||
+        (have_previous_signal &&
+         signal.source_sequence <= previous_signal_sequence) ||
+        signal.source_sequence > delivery.source_sequence) {
+      throw TradingError("market delivery has invalid price-cross signal");
+    }
+    previous_signal_sequence = signal.source_sequence;
+    have_previous_signal = true;
+    apply_fills(simulated_lob_.on_signal(signal), signal.exchange_ts_ns);
   }
   for (const auto &trade : delivery.trades) {
     invoke_strategy_callback(
@@ -303,12 +313,15 @@ void TradingEngine::apply_fills(std::span<const SyntheticFill> fills,
     if (order == orders_.end()) {
       throw TradingError("SimulatedLOB filled unknown private order");
     }
-    apply_fill(order->second, fill.price, fill.quantity, exchange_ts_ns);
+    apply_fill(order->second, fill.price, fill.quantity, exchange_ts_ns,
+               fill.liquidity_source, fill.trigger_source_sequence);
   }
 }
 
 void TradingEngine::apply_fill(OwnOrder &order, PriceTicks price,
-                               Quantity quantity, TimestampNs exchange_ts_ns) {
+                               Quantity quantity, TimestampNs exchange_ts_ns,
+                               LiquiditySource liquidity_source,
+                               Sequence trigger_source_sequence) {
   order.query.filled_quantity += quantity;
   order.query.remaining_quantity -= quantity;
   order.query.state = order.query.remaining_quantity == 0
@@ -333,11 +346,14 @@ void TradingEngine::apply_fill(OwnOrder &order, PriceTicks price,
                       order.query.remaining_quantity,
                       exchange_ts_ns,
                       now_ns_,
-                      ++next_fill_sequence_};
-  recorder_.on_fill(FillResultRow{
-      fill.exchange_ts_ns, fill.engine_ts_ns, fill.instrument_id,
-      fill.client_order_id, fill.side, fill.price, fill.quantity,
-      fill.remaining_quantity, LiquiditySource::HistoricalDisplayed});
+                      ++next_fill_sequence_,
+                      liquidity_source,
+                      trigger_source_sequence};
+  recorder_.on_fill(
+      FillResultRow{fill.exchange_ts_ns, fill.engine_ts_ns, fill.instrument_id,
+                    fill.client_order_id, fill.side, fill.price, fill.quantity,
+                    fill.remaining_quantity, fill.liquidity_source,
+                    fill.trigger_source_sequence});
   invoke_strategy_callback([this, &fill] { strategy_.on_fill(fill, *this); });
 }
 

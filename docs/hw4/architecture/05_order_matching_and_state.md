@@ -10,7 +10,7 @@ The runtime supports:
 - generated numeric client order IDs;
 - cancel by client order ID;
 - one instrument per order;
-- partial fills.
+- one full fill when the first eligible price-cross signal arrives.
 
 Unsupported types are rejected with a typed reason rather than silently
 approximated.
@@ -19,77 +19,87 @@ approximated.
 
 Only `SimulatedLOB` decides whether a synthetic fill occurs. `OrderManager` owns lifecycle transitions but does not independently match. The scheduler decides when an order arrives but not whether it fills.
 
-In the implementation, typed `EngineView` owns private resting indexes and
-historical-consumption revisions. `SimulatedLOB` returns typed
-`SyntheticFill` decisions. `TradingEngine` neither scans historical liquidity
+In the implementation, typed `EngineView` owns private resting indexes.
+`SimulatedLOB` consumes typed `PriceCrossSignal` values and returns typed
+`SyntheticFill` decisions. `TradingEngine` neither applies crossing predicates
 nor decides fill price/quantity; it only applies those decisions in order.
 
-## 3. Immediate matching algorithm
+## 3. Price-cross matching algorithm
 
 ### Buy
 
-A buy is marketable while the best privately visible historical ask satisfies:
+A buy is eligible when either:
 
 ```text
-ask_price <= buy_limit_price
+best_ask <= buy_limit_price
+trade_price <= buy_limit_price
 ```
 
 ### Sell
 
-A sell is marketable while the best privately visible historical bid satisfies:
+A sell is eligible when either:
 
 ```text
-bid_price >= sell_limit_price
+best_bid >= sell_limit_price
+trade_price >= sell_limit_price
 ```
 
-### Fill loop
+Trade aggressor side is intentionally ignored. A signal can match only an order
+with the same `instrument_id`; movement in an underlying or another option
+series cannot fill the order.
+
+### Fill decision
 
 ```text
-remaining = requested_quantity
-for each opposite historical level from best to worse:
-    stop if level price is outside the limit
-    available = historical_level_quantity - private_consumed_quantity
-    fill_qty = min(remaining, available)
-    emit fill at historical level price
-    add fill_qty to private consumption for that historical level revision
-    remaining -= fill_qty
-    stop if remaining == 0
-if remaining > 0:
-    insert the remainder as an own resting order
+for each raw price-cross signal in source-sequence order:
+    select own orders for the signal instrument in price-time order
+    for every eligible own order:
+        fill_price = best opposite quote or trade price
+        fill_qty = complete remaining_quantity
+        emit exactly one fill with QuoteCross or TradeCross source
+        remove the order from the resting index
 ```
 
-This sweep is required even though the source says “start with fill-at-touch”: stopping after one level can leave a marketable remainder crossed against the next visible level.
+Historical quote size and trade size are ignored. One small signal can therefore
+fill multiple oversized own orders. This deliberate infinite-liquidity model is
+optimistic and does not claim historical executability for the submitted size.
 
-## 4. Resting-order reevaluation
+## 4. Order arrival and resting reevaluation
 
-After every atomic historical book update for an instrument:
+An order becomes eligible only after its delayed new-order arrival. At arrival:
 
-1. identify own resting buys that are at or above the private historical best ask;
-2. identify own resting sells that are at or below the private historical best bid;
-3. process own orders by price priority, then exchange-arrival sequence FIFO;
-4. fill against privately available historical depth;
-5. update or remove resting quantities;
-6. emit fills to OrderManager before market callbacks.
+1. evaluate the current best opposite quote;
+2. fill the complete quantity at that quote if crossed;
+3. otherwise insert the order into the private price-time resting index.
 
-Do not scan every order in the system if price-indexed maps can identify only marketable ranges.
+Past trades are never replayed for a later order. After arrival, every raw
+quote/trade signal is evaluated in source order. Price-indexed maps stop the
+scan at the first non-crossed own order.
 
-## 5. Private consumption and historical revisions
+## 5. Raw-signal chronology
 
-Synthetic fills do not mutate the shared historical replay. An EngineView records only its private depletion.
+The dispatcher applies every raw row in an atomic source group and records a
+typed signal immediately after that row:
 
-Consumption must not be keyed by price alone. Use a key equivalent to:
+- a book action records the resulting best bid and ask;
+- a trade records its trade price.
 
-```text
-instrument_id + historical_side + price_ticks + level_revision
-```
+The signal span is passed with the final stable book/trade delivery. It is
+replayed before public trade and final-book callbacks. Thus “first” is exact
+within a group without exposing inconsistent intermediate books to Python.
+Every synthetic fill retains the winning raw sequence as
+`trigger_source_sequence`; the independent `sequence` field remains the
+monotonic synthetic fill sequence. An arrival-time quote fill uses the latest
+book-action source sequence retained by the historical book.
 
-The historical book increments a level revision whenever the historical content at that side/price changes in a way that invalidates previous availability. When old liquidity disappears and new liquidity appears at the same price, the new revision is not reduced by stale private consumption.
-
-A stronger per-historical-order-ID model is acceptable if it remains simple and efficient.
+`LiquiditySource::HistoricalDisplayed = 0` is retained for result compatibility.
+New runtime fills use `QuoteCross = 1` or `TradeCross = 2`.
 
 ## 6. Own-order FIFO
 
-Own resting orders at one price are ordered by `arrival_seq`, not by string ID or hash iteration. This ordering must remain stable under cancel and partial fill.
+Own resting orders at one price are ordered by `arrival_seq`, then numeric
+client order ID. A signal fills every eligible order in deterministic own
+price-time order.
 
 Own buy and sell orders must never match each other in HW4. Matching is only against the historical opposite side. If own orders cross each other, they remain private overlays unless the team explicitly adds self-match prevention/rejection as a documented decision.
 
@@ -116,19 +126,12 @@ stateDiagram-v2
 
     PendingNew --> Rejected: validation / arrival reject
     PendingNew --> Open: accepted, no fill
-    PendingNew --> PartiallyFilled: partial immediate fill
     PendingNew --> Filled: full immediate fill
 
-    Open --> PartiallyFilled: market reaches order
-    Open --> Filled: full fill
+    Open --> Filled: quote or trade crosses
     Open --> PendingCancel: cancel submitted
 
-    PartiallyFilled --> PartiallyFilled: additional partial fill
-    PartiallyFilled --> Filled: remainder filled
-    PartiallyFilled --> PendingCancel: cancel submitted
-
     PendingCancel --> Cancelled: cancel arrives first
-    PendingCancel --> PartiallyFilled: fill before cancel arrival
     PendingCancel --> Filled: full fill before cancel arrival
 
     Rejected --> [*]
@@ -138,7 +141,10 @@ stateDiagram-v2
 
 ## 9. Transition rules
 
-- `open_orders(instrument_id)` includes `PendingNew`, `Open`, `PartiallyFilled`, and `PendingCancel` orders with positive remaining quantity.
+- `open_orders(instrument_id)` includes `PendingNew`, `Open`, and
+  `PendingCancel` orders with positive remaining quantity.
+- `PartiallyFilled` remains in the public enum for compatibility but is not
+  produced by the full-fill-on-cross matcher.
 - A full fill is terminal and removes the order from open-order indexes before `on_fill()`.
 - Position and filled quantity are updated before `on_fill()`.
 - Cancel submission changes eligible states to `PendingCancel` immediately.

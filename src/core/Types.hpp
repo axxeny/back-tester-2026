@@ -69,6 +69,13 @@ enum class OrderLogEventType : std::uint8_t {
 
 enum class LiquiditySource : std::uint8_t {
   HistoricalDisplayed = 0,
+  QuoteCross = 1,
+  TradeCross = 2,
+};
+
+enum class PriceCrossSource : std::uint8_t {
+  BestQuote = 0,
+  Trade = 1,
 };
 
 } // namespace cmf

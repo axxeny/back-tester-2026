@@ -175,7 +175,7 @@ Owns strategy-visible mutable state:
 - `TradingEngine` implements `StrategyContext`, command submission, lifecycle
   transitions, position/result application, and callback order.
 - `SimulatedLOB` is the sole synthetic-fill authority; its `EngineView` owns
-  private consumption and price-time resting indexes.
+  price-time resting indexes and applies ordered quote/trade cross signals.
 - `PositionKeeper` maintains signed quantity and FIFO realized-PnL inputs.
 - `Strategy` and `Recorder` are narrow native callback interfaces.
 
@@ -227,6 +227,7 @@ over the core contracts.
 | `_backtester` | pybind11 extension installed as `back_tester._backtester` |
 | `back-tester-tests` | Native test executable registered with CTest |
 | `back-tester-scheduler-benchmark` | Release ready-signal benchmark |
+| `back-tester-price-cross-benchmark` | Release Option B trigger-buffer construction and replay benchmark |
 
 The extension is enabled by `BUILD_PYTHON_MODULE=ON`; scikit-build-core sets
 that option for editable and wheel builds.

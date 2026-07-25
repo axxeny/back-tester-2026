@@ -126,6 +126,7 @@ run concurrently. A new run remains possible after a failed run.
 | `quantity` | `int64` |
 | `remaining_quantity` | `int64` |
 | `liquidity_source` | `uint8` |
+| `trigger_source_sequence` | `uint64` |
 
 ### `order_log_df`
 

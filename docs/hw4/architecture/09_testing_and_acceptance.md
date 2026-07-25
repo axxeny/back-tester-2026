@@ -12,8 +12,8 @@ The `back-tester-tests` executable covers:
 - scheduled ordering, SPSC backpressure, ready acknowledgement, stop, and
   exception recovery;
 - delayed order/cancel arrival and equal-time priority;
-- displayed-depth sweeps, resting fills, price-time priority, and private
-  consumption;
+- quote/trade price crosses, oversized full fills, raw-signal ordering,
+  same-instrument isolation, and own price-time priority;
 - rejects, order transitions, positions, exact PnL, buffer ownership, and
   deterministic repeated runs;
 - complete runtime composition from a temporary JSONL source.
@@ -59,6 +59,7 @@ Benchmarks:
 
 ```bash
 build-release/bin/test/back-tester-scheduler-benchmark
+build-release/bin/test/back-tester-price-cross-benchmark
 uv run python python/benchmarks/callback_overhead.py
 ```
 
@@ -76,10 +77,14 @@ The test suite locks the following system behavior:
 - market, new order, and cancel events use documented stable ordering;
 - an order cannot arrive before `submit time + order latency`;
 - the dispatcher does not mutate the next market state before acknowledgement;
-- matching consumes only displayed historical liquidity at or through the
-  limit;
-- partial fills, multiple levels, later resting fills, and private revisions
-  are deterministic;
+- best-quote and trade signals are replayed in raw source order inside each
+  atomic group;
+- the first qualifying same-instrument signal fills the complete remaining
+  quantity at its trigger price, independent of historical size;
+- pre-arrival trades are not replayed and later resting fills are
+  deterministic;
+- fill results distinguish quote-cross and trade-cross sources and retain the
+  winning raw `trigger_source_sequence`;
 - position and order state are updated before callbacks;
 - terminal orders leave the open-order index;
 - Python failures cannot strand a queue or barrier;

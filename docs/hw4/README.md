@@ -13,6 +13,10 @@ backtesting engine delivered for Homework 4.
   API, results, performance, and verification.
 - [`architecture/11_requirements_traceability.md`](architecture/11_requirements_traceability.md)
   maps the written assignment and original diagram to concrete code and tests.
+- [`proposals/01_price_cross_full_fill_traceability.md`](proposals/01_price_cross_full_fill_traceability.md)
+  traces the accepted and implemented trade-or-quote price-cross full-fill
+  model from the repository baseline through the candidate code, tests,
+  contracts, and benchmark evidence.
 - [`source/01_homework_4_assignment.md`](source/01_homework_4_assignment.md) is
   the normalized assignment text.
 - [`source/02_original_big_picture_mermaid.md`](source/02_original_big_picture_mermaid.md)

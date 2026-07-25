@@ -103,7 +103,7 @@ int main() {
     }
   });
 
-  const cmf::MarketDelivery delivery{1, 0, 0, 1, {}, {}};
+  const cmf::MarketDelivery delivery{1, 0, 0, 1, {}, {}, {}};
   for (cmf::Sequence sequence = 1; sequence <= warmup_iterations; ++sequence) {
     if (!events.push_wait(cmf::ScheduledEvent{delivery, sequence}) ||
         !ready.wait_until(sequence)) {

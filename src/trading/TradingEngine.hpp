@@ -62,7 +62,8 @@ private:
   void apply_fills(std::span<const SyntheticFill> fills,
                    TimestampNs exchange_ts_ns);
   void apply_fill(OwnOrder &order, PriceTicks price, Quantity quantity,
-                  TimestampNs exchange_ts_ns);
+                  TimestampNs exchange_ts_ns, LiquiditySource liquidity_source,
+                  Sequence trigger_source_sequence);
   void emit_order_event(const OwnOrder &order, OrderLogEventType event_type,
                         RejectReason reason = RejectReason::None);
   void emit_reject(InstrumentId instrument_id, ClOrdId client_order_id,

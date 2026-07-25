@@ -35,6 +35,17 @@ struct TradeView {
   Quantity quantity{};
 };
 
+struct PriceCrossSignal {
+  InstrumentId instrument_id{};
+  TimestampNs exchange_ts_ns{};
+  TimestampNs engine_ts_ns{};
+  Sequence source_sequence{};
+  PriceCrossSource source{PriceCrossSource::BestQuote};
+  std::optional<PriceTicks> best_bid;
+  std::optional<PriceTicks> best_ask;
+  std::optional<PriceTicks> trade_price;
+};
+
 struct FillView {
   InstrumentId instrument_id{};
   ClOrdId client_order_id{};
@@ -45,6 +56,8 @@ struct FillView {
   TimestampNs exchange_ts_ns{};
   TimestampNs engine_ts_ns{};
   Sequence fill_sequence{};
+  LiquiditySource liquidity_source{LiquiditySource::HistoricalDisplayed};
+  Sequence trigger_source_sequence{};
 };
 
 struct RejectView {
@@ -82,6 +95,7 @@ struct MarketDelivery {
   Sequence source_sequence{};
   std::optional<BookUpdateView> book_update;
   std::span<const TradeView> trades;
+  std::span<const PriceCrossSignal> price_cross_signals;
 };
 
 struct ScheduledKey {
