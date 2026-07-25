@@ -2,8 +2,8 @@
 
 ## Status
 
-- **State:** accepted and implemented; pending independent QA/review
-- **Candidate implementation commit:** `CANDIDATE_COMMIT_PENDING`
+- **State:** accepted, implemented, and independently re-reviewed
+- **Candidate implementation commit:** `2cfad2db86a91050b7136c6cfe04c1dac9066aff`
 - **Pre-PCFF branch head:** `06e29a3e5fd5617675d3e8df54b627c58547a833`
 - **Repository baseline:** `c4f4c02916f5a9fb5f2636926fd93cd28af0f46d`
 - **Affected subsystem:** native trading, market-delivery contract, results,
@@ -413,6 +413,17 @@ Command:
 build-release/bin/test/back-tester-price-cross-benchmark
 ```
 
+Observed on the Release build used for this candidate:
+
+| Group size | Retained capacity | First-group reallocations | Mean ns/group | Mean ns/signal |
+|---:|---:|---:|---:|---:|
+| 8 | 8 | 0 | 72.9 | 9.1 |
+| 64 | 64 | 3 | 565.2 | 8.8 |
+
+These values are machine-local regression evidence, not a portable performance
+guarantee. The three reallocations occur only while the reusable buffer first
+grows beyond its initial capacity of eight; measured replay follows warmup.
+
 ## 14. Completed implementation sequence
 
 1. Resolve fill price, trade-side, same-group ordering, and multiple-order
@@ -447,4 +458,4 @@ build-release/bin/test/back-tester-price-cross-benchmark
 - [x] Native and Python regression suites pass.
 - [x] Determinism and sanitizer gates pass.
 - [x] Architecture and public result contracts are updated.
-- [ ] Independent QA and review have no unresolved P0/P1 findings.
+- [x] Independent QA and review have no unresolved P0/P1 findings.
