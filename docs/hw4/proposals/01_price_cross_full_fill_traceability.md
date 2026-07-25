@@ -2,7 +2,7 @@
 
 ## Status
 
-- **State:** accepted, implemented, and independently re-reviewed
+- **State:** accepted and implemented; pending independent QA/review
 - **Candidate implementation commit:** `2cfad2db86a91050b7136c6cfe04c1dac9066aff`
 - **Pre-PCFF branch head:** `06e29a3e5fd5617675d3e8df54b627c58547a833`
 - **Repository baseline:** `c4f4c02916f5a9fb5f2636926fd93cd28af0f46d`
@@ -458,4 +458,4 @@ grows beyond its initial capacity of eight; measured replay follows warmup.
 - [x] Native and Python regression suites pass.
 - [x] Determinism and sanitizer gates pass.
 - [x] Architecture and public result contracts are updated.
-- [x] Independent QA and review have no unresolved P0/P1 findings.
+- [ ] Independent QA and review have no unresolved P0/P1 findings.
