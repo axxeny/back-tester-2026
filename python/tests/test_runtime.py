@@ -313,6 +313,76 @@ def test_context_reject_and_cancel_are_non_recursive(tmp_path):
     assert strategy.max_depth == 1
 
 
+def test_cancel_after_fill_is_already_terminal_and_non_recursive(tmp_path):
+    path = write_rows(
+        tmp_path,
+        [
+            row(1, side="B", price="99", size=8, flags=0, order_id=10),
+            row(2, side="A", price="101", size=4, order_id=11),
+        ],
+    )
+
+    class CancelFilled(bt.Strategy):
+        def __init__(self):
+            super().__init__()
+            self.callback_depth = 0
+            self.max_depth = 0
+            self.events = []
+            self.order_id = None
+
+        def enter_callback(self):
+            self.callback_depth += 1
+            self.max_depth = max(self.max_depth, self.callback_depth)
+
+        def leave_callback(self):
+            self.callback_depth -= 1
+
+        def on_book_update(self, update):
+            self.enter_callback()
+            self.events.append(("book", update.sequence))
+            self.order_id = self.submit_limit(
+                update.instrument_id, bt.Side.BUY, 101_000_000_000, 6
+            )
+            self.leave_callback()
+
+        def on_fill(self, fill):
+            self.enter_callback()
+            self.events.append(("fill", fill.client_order_id))
+            assert fill.client_order_id == self.order_id
+            assert fill.quantity == 6
+            assert fill.remaining_quantity == 0
+            assert not self.cancel_order(fill.client_order_id)
+            self.events.append(("fill_done", fill.client_order_id))
+            self.leave_callback()
+
+        def on_reject(self, reject):
+            self.enter_callback()
+            self.events.append(("reject", reject.client_order_id, reject.reason))
+            self.leave_callback()
+
+    strategy = CancelFilled()
+    result = empty_strategy_run(
+        path,
+        strategy,
+        config=bt.BacktestConfig(order_latency_ns=5, book_depth=1),
+        instruments=metadata(1),
+    )
+
+    assert strategy.events == [
+        ("book", 2),
+        ("fill", strategy.order_id),
+        ("fill_done", strategy.order_id),
+        (
+            "reject",
+            strategy.order_id,
+            bt.RejectReason.ALREADY_TERMINAL,
+        ),
+    ]
+    assert strategy.max_depth == 1
+    assert result.fills_df["quantity"].tolist() == [6]
+    assert result.fills_df["remaining_quantity"].tolist() == [0]
+
+
 def test_same_strategy_concurrent_run_is_rejected_and_context_is_thread_local(
     tmp_path,
 ):
