@@ -7,6 +7,7 @@ add_executable(${TARGET} ${BENCH_SRC})
 target_link_libraries(${TARGET} PRIVATE
     googlebenchmark-static-lib
     back-tester-ingestion
+    back-tester-market-data-feed
     back-tester-order-book
     Threads::Threads
 )
